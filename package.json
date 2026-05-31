@@ -1,0 +1,25 @@
+{
+  "name": "@fraczak/k-wasm",
+  "version": "0.1.0",
+  "description": "Experimental WebAssembly backend for the k language",
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "perf:ieee": "node tests/test-ieee-perf.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fraczak/k-wasm.git"
+  },
+  "author": "Wojciech Fraczak",
+  "license": "ISC",
+  "bin": {
+    "k-wasm": "./bin/k-wasm.mjs",
+    "k-wasm-compile": "./bin/k-wasm-compile.mjs",
+    "k-wasm-run": "./bin/k-wasm-run.mjs"
+  },
+  "dependencies": {
+    "@fraczak/k": "^6.2.0",
+    "wabt": "^1.0.39"
+  }
+}
