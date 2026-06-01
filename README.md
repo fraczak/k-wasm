@@ -11,8 +11,11 @@ Install dependencies:
 npm install
 ```
 
-Until the backend API is available in a published `@fraczak/k` release, link a
-sibling core checkout for local development:
+Until the backend API is available in a published `@fraczak/k` release, the
+dependency is pinned to the GitHub core revision that introduced it.
+
+When developing both repositories together, optionally link a sibling core
+checkout:
 
 ```bash
 npm link --no-save ../k

@@ -19,7 +19,7 @@
     "k-wasm-run": "./bin/k-wasm-run.mjs"
   },
   "dependencies": {
-    "@fraczak/k": "^6.2.0",
+    "@fraczak/k": "git+https://github.com/fraczak/k.git#19fca0c88cff454fbe08d6745b54f5ef96e50200",
     "wabt": "^1.0.39"
   }
 }

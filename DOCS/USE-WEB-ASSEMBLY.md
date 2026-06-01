@@ -11,12 +11,19 @@ From a checkout:
 
 ```bash
 npm install
-npm link --no-save ../k
 npm link
 ```
 
-The second command links a sibling core checkout for local development. It can
-be omitted after the required `@fraczak/k` backend API is published.
+Until the required backend API is available in a published `@fraczak/k`
+release, the dependency is pinned to the GitHub core revision that introduced
+it.
+
+When developing both repositories together, optionally link a sibling core
+checkout:
+
+```bash
+npm link --no-save ../k
+```
 
 This installs three commands:
 
