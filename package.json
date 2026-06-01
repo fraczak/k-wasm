@@ -1,6 +1,6 @@
 {
   "name": "@fraczak/k-wasm",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Experimental WebAssembly backend for the k language",
   "type": "module",
   "scripts": {
