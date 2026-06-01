@@ -320,12 +320,94 @@ console.log("==> Running Union & Choice Integration Tests");
 import {
   exportPatternGraph,
   fromObject,
+  NODE_KIND,
   patternToPropertyList,
   Product,
   propertyListToPattern,
   Variant
 } from "@fraczak/k/backend-api.mjs";
 import { getTagFromId } from "../src/kvm2wasm.mjs";
+import { readArenaValue, writeValueToArena } from "../src/wasm.mjs";
+
+console.log("==> Running Stack-Safe Arena Serialization Tests");
+{
+  const depth = 12000;
+  const memory = { buffer: new ArrayBuffer(1024 + 8 + 16 * (depth + 2)) };
+  const view = new DataView(memory.buffer);
+  const propertyList = [
+    ["closed-union", [["+", 1]]],
+    ["closed-union", [["_", 2], ["1", 1]]],
+    ["closed-product", []]
+  ];
+  const pattern = {
+    nodes: [
+      { kind: NODE_KIND.CLOSED_UNION, edges: [{ label: "+", target: 1 }] },
+      { kind: NODE_KIND.CLOSED_UNION, edges: [{ label: "_", target: 2 }, { label: "1", target: 1 }] },
+      { kind: NODE_KIND.CLOSED_PRODUCT, edges: [] }
+    ]
+  };
+  const tagNames = new Map([[1, "+"], [2, "_"], [3, "1"]]);
+  const tagIds = new Map([["+", 1], ["_", 2], ["1", 3]]);
+  const tags = {
+    getId: (tag) => tagIds.get(tag) ?? null,
+    getTag: (id) => tagNames.get(id) ?? null
+  };
+  let free = 1024;
+
+  function writeVariant(tagId, payloadPtr) {
+    const ptr = free;
+    free += 12;
+    view.setUint32(ptr, 12, true);
+    view.setUint32(ptr + 4, tagId, true);
+    view.setUint32(ptr + 8, payloadPtr, true);
+    return ptr;
+  }
+
+  const unitPtr = free;
+  free += 8;
+  view.setUint32(unitPtr, 8, true);
+  view.setUint32(unitPtr + 4, 0, true);
+
+  let ptr = writeVariant(2, unitPtr);
+  for (let i = 0; i < depth; i++) {
+    ptr = writeVariant(3, ptr);
+  }
+  ptr = writeVariant(1, ptr);
+
+  function assertDeepValue(output) {
+    assert.equal(output.tag, "+");
+    let bits = output.value;
+    for (let i = 0; i < depth; i++) {
+      assert.equal(bits.tag, "1");
+      bits = bits.value;
+    }
+    assert.equal(bits.tag, "_");
+    assert.deepEqual(bits.value.product, {});
+  }
+
+  assertDeepValue(readArenaValue({ memory }, ptr, pattern, 0, propertyList, new Map(), tags));
+
+  let input = new Variant("_", new Product({}));
+  for (let i = 0; i < depth; i++) {
+    input = new Variant("1", input);
+  }
+  input = new Variant("+", input);
+
+  free = 1024;
+  const exports = {
+    memory,
+    alloc(size) {
+      const ptr = free;
+      free += (size + 7) & -8;
+      return ptr;
+    }
+  };
+  const arenaValues = new Map();
+  ptr = writeValueToArena(exports, input, pattern, 0, arenaValues, tags);
+  const output = readArenaValue(exports, ptr, pattern, 0, propertyList, arenaValues, tags);
+  assertDeepValue(output);
+  console.log("Stack-safe arena serialization tests passed successfully!");
+}
 
 console.log("==> Running End-to-End Peano Addition & Serialization Tests");
 {

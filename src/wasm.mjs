@@ -219,114 +219,182 @@ function createTagRegistry(entries) {
 }
 
 function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyList, arenaValues, tags) {
-  const patternNode = pattern.nodes[patternNodeId];
-  const view = new DataView(exports.memory.buffer);
-
-  if (patternNode.kind === NODE_KIND.ANY) {
-    const value = arenaValues.get(ptr);
-    if (value === undefined) {
-      throw new Error(`Cannot decode arena pointer ${ptr} through an unconstrained output pattern`);
+  let result;
+  const stack = [{
+    ptr,
+    patternNodeId,
+    assign(value) {
+      result = value;
     }
-    return value;
+  }];
+
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    const patternNode = pattern.nodes[frame.patternNodeId];
+    const view = new DataView(exports.memory.buffer);
+
+    if (patternNode.kind === NODE_KIND.ANY) {
+      const value = arenaValues.get(frame.ptr);
+      if (value === undefined) {
+        throw new Error(`Cannot decode arena pointer ${frame.ptr} through an unconstrained output pattern`);
+      }
+      frame.assign(value);
+      continue;
+    }
+
+    if (patternNode.kind === NODE_KIND.OPEN_PRODUCT || patternNode.kind === NODE_KIND.CLOSED_PRODUCT) {
+      const N = view.getUint32(frame.ptr + 4, true);
+      if (N !== patternNode.edges.length) {
+        const value = arenaValues.get(frame.ptr);
+        if (value !== undefined) {
+          frame.assign(value);
+          continue;
+        }
+        throw new Error(`Cannot decode product pointer ${frame.ptr}: arena field count ${N} does not match output pattern`);
+      }
+      const product = {};
+      frame.assign(new Product(product, patternPropertyList));
+      for (let i = N - 1; i >= 0; i--) {
+        const edge = patternNode.edges[i];
+        const offset = view.getUint32(frame.ptr + 8 + 4 * i, true);
+        const childPtr = view.getUint32(frame.ptr + offset, true);
+        stack.push({
+          ptr: childPtr,
+          patternNodeId: edge.target,
+          assign(value) {
+            product[edge.label] = value;
+          }
+        });
+      }
+      continue;
+    }
+
+    if (patternNode.kind === NODE_KIND.OPEN_UNION || patternNode.kind === NODE_KIND.CLOSED_UNION) {
+      const tag = tags.getTag(view.getUint32(frame.ptr + 4, true));
+      const edge = patternNode.edges.find((candidate) => candidate.label === tag);
+      if (!edge) {
+        const value = arenaValues.get(frame.ptr);
+        if (value !== undefined) {
+          frame.assign(value);
+          continue;
+        }
+        throw new Error(`Variant tag '${tag}' not found in output pattern edges`);
+      }
+      const payloadPtr = view.getUint32(frame.ptr + 8, true);
+      const variant = new Variant(tag, undefined, patternPropertyList);
+      frame.assign(variant);
+      stack.push({
+        ptr: payloadPtr,
+        patternNodeId: edge.target,
+        assign(value) {
+          variant.value = value;
+        }
+      });
+      continue;
+    }
+
+    throw new Error(`Unsupported pattern kind: ${patternNode.kind}`);
   }
 
-  if (patternNode.kind === NODE_KIND.OPEN_PRODUCT || patternNode.kind === NODE_KIND.CLOSED_PRODUCT) {
-    const N = view.getUint32(ptr + 4, true);
-    if (N !== patternNode.edges.length) {
-      const value = arenaValues.get(ptr);
-      if (value !== undefined) return value;
-      throw new Error(`Cannot decode product pointer ${ptr}: arena field count ${N} does not match output pattern`);
-    }
-    const product = {};
-    for (let i = 0; i < N; i++) {
-      const edge = patternNode.edges[i];
-      const offset = view.getUint32(ptr + 8 + 4 * i, true);
-      const childPtr = view.getUint32(ptr + offset, true);
-      product[edge.label] = readArenaValue(exports, childPtr, pattern, edge.target, patternPropertyList, arenaValues, tags);
-    }
-    return new Product(product, patternPropertyList);
-  }
-
-  if (patternNode.kind === NODE_KIND.OPEN_UNION || patternNode.kind === NODE_KIND.CLOSED_UNION) {
-    const tag = tags.getTag(view.getUint32(ptr + 4, true));
-    const edge = patternNode.edges.find((candidate) => candidate.label === tag);
-    if (!edge) {
-      const value = arenaValues.get(ptr);
-      if (value !== undefined) return value;
-      throw new Error(`Variant tag '${tag}' not found in output pattern edges`);
-    }
-    const payloadPtr = view.getUint32(ptr + 8, true);
-    return new Variant(
-      tag,
-      readArenaValue(exports, payloadPtr, pattern, edge.target, patternPropertyList, arenaValues, tags),
-      patternPropertyList
-    );
-  }
-
-  throw new Error(`Unsupported pattern kind: ${patternNode.kind}`);
+  return result;
 }
 
 function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, tags) {
-  const patternNode = pattern.nodes[patternNodeId];
+  let result;
+  const stack = [{
+    value,
+    patternNodeId,
+    assign(ptr) {
+      result = ptr;
+    }
+  }];
 
-  if (value instanceof Product) {
-    const isAny = patternNode.kind === NODE_KIND.ANY;
-    const keys = Object.keys(value.product).sort();
-    const N = keys.length;
-    const ptr = exports.alloc(8 + 8 * N);
-    const childPtrs = [];
+  while (stack.length > 0) {
+    const frame = stack.pop();
 
-    for (const label of keys) {
-      const edge = isAny ? null : patternNode.edges.find((candidate) => candidate.label === label);
-      if (!isAny && !edge) {
-        throw new Error(`Product field '${label}' is not present in input pattern node ${patternNodeId}`);
+    if (frame.finishProduct) {
+      const N = frame.childPtrs.length;
+      const view = new DataView(exports.memory.buffer);
+      view.setUint32(frame.ptr, 8 + 8 * N, true);
+      view.setUint32(frame.ptr + 4, N, true);
+      for (let i = 0; i < N; i++) {
+        const offset = 8 + 4 * N + 4 * i;
+        view.setUint32(frame.ptr + 8 + 4 * i, offset, true);
+        view.setUint32(frame.ptr + offset, frame.childPtrs[i], true);
       }
-      childPtrs.push(writeValueToArena(
-        exports,
-        value.product[label],
-        pattern,
-        isAny ? patternNodeId : edge.target,
-        arenaValues,
-        tags
-      ));
+      arenaValues.set(frame.ptr, frame.value);
+      frame.assign(frame.ptr);
+      continue;
     }
 
-    const view = new DataView(exports.memory.buffer);
-    view.setUint32(ptr, 8 + 8 * N, true);
-    view.setUint32(ptr + 4, N, true);
-    for (let i = 0; i < N; i++) {
-      const offset = 8 + 4 * N + 4 * i;
-      view.setUint32(ptr + 8 + 4 * i, offset, true);
-      view.setUint32(ptr + offset, childPtrs[i], true);
+    if (frame.finishVariant) {
+      const ptr = exports.alloc(12);
+      const view = new DataView(exports.memory.buffer);
+      view.setUint32(ptr, 12, true);
+      view.setUint32(ptr + 4, tags.getId(frame.value.tag), true);
+      view.setUint32(ptr + 8, frame.childPtr, true);
+      arenaValues.set(ptr, frame.value);
+      frame.assign(ptr);
+      continue;
     }
-    arenaValues.set(ptr, value);
-    return ptr;
+
+    const patternNode = pattern.nodes[frame.patternNodeId];
+    if (frame.value instanceof Product) {
+      const isAny = patternNode.kind === NODE_KIND.ANY;
+      const keys = Object.keys(frame.value.product).sort();
+      const childPtrs = new Array(keys.length);
+      const ptr = exports.alloc(8 + 8 * keys.length);
+      stack.push({
+        finishProduct: true,
+        value: frame.value,
+        ptr,
+        childPtrs,
+        assign: frame.assign
+      });
+      for (let i = keys.length - 1; i >= 0; i--) {
+        const label = keys[i];
+        const edge = isAny ? null : patternNode.edges.find((candidate) => candidate.label === label);
+        if (!isAny && !edge) {
+          throw new Error(`Product field '${label}' is not present in input pattern node ${frame.patternNodeId}`);
+        }
+        stack.push({
+          value: frame.value.product[label],
+          patternNodeId: isAny ? frame.patternNodeId : edge.target,
+          assign(ptr) {
+            childPtrs[i] = ptr;
+          }
+        });
+      }
+      continue;
+    }
+
+    if (frame.value instanceof Variant) {
+      const isAny = patternNode.kind === NODE_KIND.ANY;
+      const edge = isAny ? null : patternNode.edges.find((candidate) => candidate.label === frame.value.tag);
+      if (!isAny && !edge) {
+        throw new Error(`Variant tag '${frame.value.tag}' is not present in input pattern node ${frame.patternNodeId}`);
+      }
+      const variantFrame = {
+        finishVariant: true,
+        value: frame.value,
+        childPtr: null,
+        assign: frame.assign
+      };
+      stack.push(variantFrame);
+      stack.push({
+        value: frame.value.value,
+        patternNodeId: isAny ? frame.patternNodeId : edge.target,
+        assign(ptr) {
+          variantFrame.childPtr = ptr;
+        }
+      });
+      continue;
+    }
+
+    throw new Error(`Unsupported value type: ${frame.value}`);
   }
 
-  if (value instanceof Variant) {
-    const isAny = patternNode.kind === NODE_KIND.ANY;
-    const edge = isAny ? null : patternNode.edges.find((candidate) => candidate.label === value.tag);
-    if (!isAny && !edge) {
-      throw new Error(`Variant tag '${value.tag}' is not present in input pattern node ${patternNodeId}`);
-    }
-    const childPtr = writeValueToArena(
-      exports,
-      value.value,
-      pattern,
-      isAny ? patternNodeId : edge.target,
-      arenaValues,
-      tags
-    );
-    const ptr = exports.alloc(12);
-    const view = new DataView(exports.memory.buffer);
-    view.setUint32(ptr, 12, true);
-    view.setUint32(ptr + 4, tags.getId(value.tag), true);
-    view.setUint32(ptr + 8, childPtr, true);
-    arenaValues.set(ptr, value);
-    return ptr;
-  }
-
-  throw new Error(`Unsupported value type: ${value}`);
+  return result;
 }
 
 async function runWasmArtifact(wasmBuffer, inputBuffer) {
@@ -355,7 +423,9 @@ export {
   appendCustomSection,
   compileWasmArtifact,
   metadataFromModule,
-  runWasmArtifact
+  readArenaValue,
+  runWasmArtifact,
+  writeValueToArena
 };
 
 export default {
@@ -365,5 +435,7 @@ export default {
   appendCustomSection,
   compileWasmArtifact,
   metadataFromModule,
-  runWasmArtifact
+  readArenaValue,
+  runWasmArtifact,
+  writeValueToArena
 };
