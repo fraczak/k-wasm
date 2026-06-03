@@ -86,8 +86,45 @@ export function lowerToWasm(relDef, name, options = {}) {
   };
   renameRegisters(kvmFunc.body, "");
   const typePatternGraph = relDef.typePatternGraph || kvmFunc.typePatternGraph;
+  const kvmProgram = options.kvmProgram || {};
 
   const cleanReg = (rName) => rName.replace("%", "").replace("$", "");
+  const registerPatterns = new Map();
+  if (Array.isArray(kvmFunc.inputPattern)) {
+    registerPatterns.set("in", kvmFunc.inputPattern);
+  }
+
+  const mappedReg = (rName, inputMap = {}) => {
+    const raw = cleanReg(rName);
+    return inputMap[raw] || raw;
+  };
+
+  const setPattern = (rName, pattern) => {
+    if (rName && Array.isArray(pattern)) {
+      registerPatterns.set(cleanReg(rName), pattern);
+    }
+  };
+
+  const getPattern = (rName, inputMap = {}) => registerPatterns.get(mappedReg(rName, inputMap));
+
+  const getProductEdges = (inst, inputMap) => {
+    if (typePatternGraph) {
+      const inputPatternId = inst.exp.patterns[0];
+      const inputPatternNodeId = typePatternGraph.find(inputPatternId);
+      const inputPropertyList = patternToPropertyList(exportPatternGraph(typePatternGraph, inputPatternNodeId));
+      return inputPropertyList[0][1];
+    }
+
+    const inputPropertyList = getPattern(inst.src, inputMap);
+    const inputRoot = inputPropertyList?.[0];
+    if (!Array.isArray(inputRoot) || !Array.isArray(inputRoot[1])) {
+      throw new Error(`Wasm compiler: cannot infer input pattern for field '${inst.label}'`);
+    }
+    if (inputRoot[0] !== "open-product" && inputRoot[0] !== "closed-product") {
+      throw new Error(`Wasm compiler: field '${inst.label}' requires a product input pattern`);
+    }
+    return inputRoot[1];
+  };
 
   const registers = new Set();
   registers.add("call_val");
@@ -126,6 +163,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           const src = inputMap[rawSrc] || rawSrc;
           lines.push(`    local.get $${src}`);
           lines.push(`    local.set $${dest}`);
+          setPattern(dest, inst.pattern || getPattern(inst.src, inputMap));
           break;
         }
         case "fail": {
@@ -144,6 +182,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           if (returnTarget) {
             lines.push(`    local.get $${src}`);
             lines.push(`    local.set $${returnTarget}`);
+            setPattern(returnTarget, getPattern(inst.src, inputMap));
           } else {
             lines.push(`    local.get $${src}`);
             lines.push(`    i32.const 1`);
@@ -156,10 +195,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           const rawSrc = cleanReg(inst.src);
           const src = inputMap[rawSrc] || rawSrc;
 
-          const inputPatternId = inst.exp.patterns[0];
-          const inputPatternNodeId = typePatternGraph.find(inputPatternId);
-          const inputPropertyList = patternToPropertyList(exportPatternGraph(typePatternGraph, inputPatternNodeId));
-          const edges = inputPropertyList[0][1];
+          const edges = getProductEdges(inst, inputMap);
           const fieldIndex = edges.findIndex(([label]) => label === inst.label);
           if (fieldIndex === -1) {
             throw new Error(`Wasm compiler: field '${inst.label}' not found in input pattern`);
@@ -185,6 +221,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           lines.push(`    i32.add`);
           lines.push(`    i32.load`);
           lines.push(`    local.set $${dest}`);
+          setPattern(dest, inst.pattern);
           break;
         }
         case "product": {
@@ -235,6 +272,7 @@ export function lowerToWasm(relDef, name, options = {}) {
             lines.push(`    local.get $${fieldTmp}`);
             lines.push(`    i32.store offset=${offsetVal}`);
           }
+          setPattern(dest, inst.pattern);
           break;
         }
         case "make_variant": {
@@ -259,6 +297,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           lines.push(`    local.get $${dest}`);
           lines.push(`    local.get $${src}`);
           lines.push(`    i32.store offset=8`);
+          setPattern(dest, inst.pattern);
           break;
         }
         case "project_variant": {
@@ -297,6 +336,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           lines.push(`    local.get $${src}`);
           lines.push(`    i32.load offset=8`);
           lines.push(`    local.set $${dest}`);
+          setPattern(dest, inst.pattern);
           break;
         }
         case "union": {
@@ -342,6 +382,7 @@ export function lowerToWasm(relDef, name, options = {}) {
             lines.push(`      return`);
           }
           lines.push(`    ) ;; end $union_done_${unionId}`);
+          setPattern(dest, inst.pattern);
           break;
         }
         case "call": {
@@ -380,6 +421,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           lines.push(`    end`);
           lines.push(`    local.get $call_val`);
           lines.push(`    local.set $${dest}`);
+          setPattern(dest, kvmProgram[inst.func]?.outputPattern || inst.pattern);
           break;
         }
         case "call_intrinsic": {
@@ -390,6 +432,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           lines.push(`    ;; call_intrinsic ${inst.symbol}`);
           lines.push(`    local.get $${src}`);
           lines.push(`    local.set $${dest}`);
+          setPattern(dest, inst.pattern || getPattern(inst.src, inputMap));
           break;
         }
         default:

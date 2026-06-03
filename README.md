@@ -61,13 +61,17 @@ k-unit --parse | k-wasm-run /tmp/ok.wasm | k-print
 
 | Command | Purpose |
 | --- | --- |
-| `k-wasm` | Compile a k expression or source file in memory and run it immediately |
-| `k-wasm-compile` | Compile a k expression or source file into a `.wasm` artifact |
+| `k-wasm` | Compile k source, `.ko`, or `.kvm` input in memory and run it immediately |
+| `k-wasm-compile` | Compile k source, `.ko`, or `.kvm` input into a `.wasm` artifact |
 | `k-wasm-run` | Run an existing `.wasm` artifact over a binary input stream |
 
-All commands accept `--help`. The compile commands accept repeated `--lib`
-options for `.klib` dependencies and `-k file` for source files. The runners
-read a binary input stream from standard input unless an input file is given.
+All commands accept `--help`. The compile commands follow the `k-compile`
+input convention: pass inline source, an existing source path, a `.ko` object,
+or a `.kvm` program. They also accept repeated `--lib` options for `.klib`
+dependencies and repeated `--export` options to bring library aliases into the
+source scope. The older `-k file` form still works for source files. The
+runners read a binary input stream from standard input unless an input file is
+given.
 
 ## Artifacts
 
@@ -75,7 +79,7 @@ The compiler produces a standard WebAssembly binary module containing the
 reachable relations, the arena runtime, and a `k.metadata` custom section. The
 metadata stores the entry point and the pattern information needed to encode
 and decode values. A compiled artifact can be run later without its original k
-source or `.klib` files.
+source, object, kVM, or `.klib` files.
 
 The current host runner targets Node.js. It is still needed to bridge between
 WebAssembly linear memory and k binary streams.

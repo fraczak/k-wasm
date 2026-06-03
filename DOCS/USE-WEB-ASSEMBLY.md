@@ -25,8 +25,8 @@ This installs three commands:
 
 | Command | Purpose |
 | --- | --- |
-| `k-wasm` | Compile a k program in memory and run it immediately |
-| `k-wasm-compile` | Compile a k program into a standalone `.wasm` artifact |
+| `k-wasm` | Compile k source, `.ko`, or `.kvm` input in memory and run it immediately |
+| `k-wasm-compile` | Compile k source, `.ko`, or `.kvm` input into a standalone `.wasm` artifact |
 | `k-wasm-run` | Run a previously compiled `.wasm` artifact |
 
 The same tools can be called directly from a checkout with
@@ -44,7 +44,7 @@ A source file must end with the expression that becomes its entry point:
 Compile it:
 
 ```bash
-k-wasm-compile -k program.k program.wasm
+k-wasm-compile program.k program.wasm
 ```
 
 Run it over a binary input stream:
@@ -94,28 +94,43 @@ Both runners accept an optional binary input file:
 ```bash
 k-unit --parse > input.kv
 k-wasm-run program.wasm input.kv > output.kv
-k-print output.kv
+k-print < output.kv
 ```
 
 The one-step command has the same input-file form:
 
 ```bash
-k-wasm -k program.k input.kv > output.kv
+k-wasm program.k input.kv > output.kv
 ```
+
+## Compile from k Objects or kVM
+
+`k-wasm-compile` can consume the object and kVM outputs produced by
+`k-compile`:
+
+```bash
+k-compile program.k program.ko
+k-wasm-compile program.ko program.wasm
+
+k-compile program.k program.kvm
+k-wasm-compile program.kvm program.wasm
+```
+
+Use `.ko` when you want to preserve the compiled object form for the normal k
+toolchain. Use `.kvm` when you want to inspect or cache the lowered kVM program
+before producing WebAssembly.
 
 ## Compile with Libraries
 
 `k-wasm-compile` and `k-wasm` accept repeated `--lib` options before the
-program. Loaded relations are content-addressed, so use their canonical hashes
-in the program expression.
+program. Use repeated `--export` options to bring aliases from those libraries
+into the source scope. The export spec is `name` or `libname:localname`.
 
 For a library that defines `transform`:
 
 ```bash
-k-compile-lib library.k library.klib
-TRANSFORM=$(k-extract-aliases library.klib |
-  sed -n 's/^transform = \(@[^;]*\);.*$/\1/p')
-k-wasm-compile --lib library.klib "$TRANSFORM" program.wasm
+k-compile library.k library.klib
+k-wasm-compile --lib library.klib --export transform 'transform' program.wasm
 k-parse |
   k-wasm-run program.wasm |
   k-print
@@ -170,12 +185,16 @@ the section with `WebAssembly.Module.customSections(...)`.
 
 Compilation follows these steps:
 
-1. Parse and annotate the k source, including any loaded `.klib` dependencies.
-2. Lower the main relation and every reachable relation to kVM instructions.
-3. Lower each kVM function to WebAssembly text.
-4. Combine the generated functions with `runtime.wat`.
-5. Use WABT to validate the text and emit a binary WebAssembly module.
-6. Append the `k.metadata` custom section to the binary module.
+1. Resolve the input as inline source, a source file, a `.ko` object, or a
+   `.kvm` program.
+2. For source input, parse and annotate the source, including any loaded
+   `.klib` dependencies and `--export` aliases.
+3. For `.ko` input, use the hydrated relation definitions directly.
+4. For `.kvm` input, use the already-lowered kVM functions directly.
+5. Lower each reachable kVM function to WebAssembly text.
+6. Combine the generated functions with `runtime.wat`.
+7. Use WABT to validate the text and emit a binary WebAssembly module.
+8. Append the `k.metadata` custom section to the binary module.
 
 The implementation lives in [`src/wasm.mjs`](../src/wasm.mjs). The command-line
 wrappers are [`k-wasm-compile.mjs`](../bin/k-wasm-compile.mjs),
@@ -209,7 +228,8 @@ result of `0` means that the k relation was undefined for that input.
   a host runner that understands k binary streams and the `k.metadata` section.
 - `k-wasm-run` currently targets Node.js. A browser runner can use the same
   artifact format but has not been added yet.
-- `k-wasm-compile` compiles k source or an expression. It does not yet compile
-  `.ko` objects.
+- `.klib` files are compile-time dependencies, not standalone WebAssembly
+  inputs. Load them with `--lib` and compile source, `.ko`, or `.kvm` input with
+  a main relation.
 - The backend is experimental. Use `k` as the general-purpose runtime while
   WebAssembly pattern coverage and optimization continue to evolve.

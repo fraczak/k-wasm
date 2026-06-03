@@ -3,26 +3,25 @@
 import fs from "node:fs";
 import { argv, exit, stdin, stdout } from "node:process";
 
-import { decodeObject, loadLibrary } from "@fraczak/k/backend-api.mjs";
-import { compileWasmArtifact, runWasmArtifact } from "../src/wasm.mjs";
+import {
+  compileProgramInput,
+  parseCompileOptions,
+  readAll,
+  resolveProgramInput
+} from "../src/cli.mjs";
+import { runWasmArtifact } from "../src/wasm.mjs";
 
 function usage(stream = console.error) {
   const prog = argv[1] || "k-wasm.mjs";
-  stream(`Usage: node ${prog} [ options ] ( k-expr | -k file ) [ input-file ]`);
-  stream("Compile a k program to WebAssembly in memory and run it over a binary pattern+value stream.");
+  stream(`Usage: node ${prog} [options] ( source-snippet | input-file | -k file ) [ input-file ]`);
+  stream("Compile k source, .ko, or .kvm input to WebAssembly in memory and run it over a binary pattern+value stream.");
   stream("");
   stream("Options:");
-  stream("  --lib file   Load a .klib dependency before compiling. May be repeated.");
-  stream("  -h, --help   Show this help.");
-}
-
-function readAll(stream) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    stream.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-  });
+  stream("  --lib file       Load a .klib dependency before compiling. May be repeated.");
+  stream("  --export spec    Export a library alias into source scope. May be repeated.");
+  stream("                   spec is 'name' or 'libname:localname'.");
+  stream("  -k file          Read k source from file. Kept for compatibility.");
+  stream("  -h, --help       Show this help.");
 }
 
 async function main() {
@@ -32,25 +31,14 @@ async function main() {
     return;
   }
 
-  const libraries = [];
-  while (args.length > 0 && args[0] === "--lib") {
-    args.shift();
-    const libPath = args.shift();
-    if (!libPath) throw new Error("--lib requires a file argument");
-    libraries.push(loadLibrary(decodeObject(fs.readFileSync(libPath))));
-  }
-
-  const programArg = args.shift();
-  if (programArg == null) throw new Error("Missing script argument");
-  const source = programArg === "-k"
-    ? fs.readFileSync(args.shift() || (() => { throw new Error("-k requires a file argument"); })(), "utf8")
-    : programArg;
+  const { libraries, exportSpecs } = parseCompileOptions(args);
+  const programInput = resolveProgramInput(args);
   const inputPath = args.shift();
   if (args.length > 0) throw new Error("Too many arguments");
 
-  const input = await readAll(inputPath == null ? stdin : fs.createReadStream(inputPath));
-  const artifact = await compileWasmArtifact(source, { libraries });
-  stdout.write(await runWasmArtifact(artifact, input));
+  const inputBuffer = await readAll(inputPath == null ? stdin : fs.createReadStream(inputPath));
+  const artifact = await compileProgramInput(programInput, { libraries, exportSpecs });
+  stdout.write(await runWasmArtifact(artifact, inputBuffer));
 }
 
 main().catch((error) => {

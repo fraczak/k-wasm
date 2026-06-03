@@ -78,6 +78,27 @@ function cleanCallNames(insts) {
   }
 }
 
+function cloneKVMInstructions(insts) {
+  return insts.map((inst) => ({
+    ...inst,
+    ...(inst.branches
+      ? {
+          branches: inst.branches.map((branch) => ({
+            label: branch.label,
+            body: cloneKVMInstructions(branch.body)
+          }))
+        }
+      : {})
+  }));
+}
+
+function cloneKVMFunction(kvmFunc) {
+  return {
+    ...kvmFunc,
+    body: cloneKVMInstructions(kvmFunc.body)
+  };
+}
+
 function compileModule(mainRelName, defs) {
   const compiled = new Set();
   const queue = [mainRelName];
@@ -100,6 +121,35 @@ function compileModule(mainRelName, defs) {
     kvmFunc.name = cleanName(name);
     cleanCallNames(kvmFunc.body);
     wats.push(lowerToWasm(kvmFunc, kvmFunc.name));
+  }
+
+  return wats.join("\n\n");
+}
+
+function compileKVMModule(mainRelName, kvmProgram) {
+  const compiled = new Set();
+  const queue = [mainRelName];
+  const wats = [];
+  const cleanKVMProgram = Object.fromEntries(
+    Object.entries(kvmProgram).map(([name, kvmFunc]) => [cleanName(name), kvmFunc])
+  );
+
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (compiled.has(name)) continue;
+    compiled.add(name);
+
+    const originalFunc = kvmProgram[name];
+    if (!originalFunc || !Array.isArray(originalFunc.body)) {
+      throw new Error(`kVM function ${name} not found`);
+    }
+
+    scanCalls(originalFunc.body, compiled, queue);
+
+    const kvmFunc = cloneKVMFunction(originalFunc);
+    kvmFunc.name = cleanName(name);
+    cleanCallNames(kvmFunc.body);
+    wats.push(lowerToWasm(kvmFunc, kvmFunc.name, { kvmProgram: cleanKVMProgram }));
   }
 
   return wats.join("\n\n");
@@ -163,27 +213,99 @@ function metadataFromModule(module) {
   return validateMetadata(JSON.parse(Buffer.from(sections[0]).toString("utf8")));
 }
 
-async function compileWasmArtifact(source, { libraries = [] } = {}) {
-  resetTagIds();
-  const defs = annotate(source, { libraries });
-  const mainRel = defs.rels.__main__;
-  if (!mainRel) {
-    throw new Error("No main relation (__main__) defined in script");
+function buildExportPreamble(exportSpecs, libraries) {
+  if (exportSpecs.length === 0) return "";
+
+  const aliasMap = {};
+  for (const lib of libraries) {
+    for (const [name, hash] of Object.entries(lib.relAlias || {})) {
+      if (name !== "__main__") aliasMap[name] = hash;
+    }
+    for (const [hash, entry] of Object.entries(lib.meta || {})) {
+      if (entry?.type !== "rel") continue;
+      for (const origin of entry?.origins || []) {
+        if (origin?.name && origin.name !== "__main__") {
+          aliasMap[origin.name] = hash;
+        }
+      }
+    }
   }
 
-  const moduleWatBody = compileModule("__main__", defs);
+  const lines = [];
+  for (const spec of exportSpecs) {
+    const [libName, localName] = spec.includes(":") ? spec.split(":", 2) : [spec, spec];
+    const hash = aliasMap[libName];
+    if (!hash) throw new Error(`--export: '${libName}' not found in loaded libraries`);
+    const body = hash.startsWith("@") ? hash.slice(1) : hash;
+    lines.push(`${localName} = @${body};`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+async function compileWasmArtifactFromDefs(defs, mainRelName = "__main__") {
+  resetTagIds();
+  const mainRel = defs.rels[mainRelName];
+  if (!mainRel) {
+    throw new Error(`No main relation (${mainRelName}) defined in script`);
+  }
+
+  const moduleWatBody = compileModule(mainRelName, defs);
   const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + moduleWatBody + "\n)";
   const graph = mainRel.typePatternGraph;
   const metadata = {
     format: ARTIFACT_FORMAT,
     version: ARTIFACT_VERSION,
     abi: "arena-v1",
-    entry: cleanName("__main__"),
+    entry: cleanName(mainRelName),
     inputPattern: getPatternPropertyList(graph, mainRel.def.patterns[0]),
     outputPattern: getPatternPropertyList(graph, mainRel.def.patterns[1]),
     tags: getTagEntries()
   };
   return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
+}
+
+async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__" } = {}) {
+  resetTagIds();
+  if (!kvmProgram || typeof kvmProgram !== "object" || Array.isArray(kvmProgram)) {
+    throw new Error("Expected .kvm input to contain a JSON object of kVM functions");
+  }
+
+  const mainFunc = kvmProgram[entry];
+  if (!mainFunc) {
+    throw new Error(`No kVM entry function (${entry}) defined in program`);
+  }
+  if (!Array.isArray(mainFunc.inputPattern) || !Array.isArray(mainFunc.outputPattern)) {
+    throw new Error(`kVM entry function (${entry}) is missing input/output patterns`);
+  }
+
+  const moduleWatBody = compileKVMModule(entry, kvmProgram);
+  const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + moduleWatBody + "\n)";
+  const metadata = {
+    format: ARTIFACT_FORMAT,
+    version: ARTIFACT_VERSION,
+    abi: "arena-v1",
+    entry: cleanName(entry),
+    inputPattern: mainFunc.inputPattern,
+    outputPattern: mainFunc.outputPattern,
+    tags: getTagEntries()
+  };
+  return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
+}
+
+async function compileWasmArtifactFromObject(object, { entry = null } = {}) {
+  if (!object?.rels) {
+    throw new Error("Expected .ko input to contain k object relations");
+  }
+  if (object.main == null) {
+    throw new Error("Cannot compile a .klib library to WebAssembly without a main relation");
+  }
+  return compileWasmArtifactFromDefs({ rels: object.rels }, entry || object.main || "__main__");
+}
+
+async function compileWasmArtifact(source, { libraries = [], exports = [], source: sourceName = null } = {}) {
+  const preamble = buildExportPreamble(exports, libraries);
+  const defs = annotate(preamble + source, { libraries, ...(sourceName ? { source: sourceName } : {}) });
+  return compileWasmArtifactFromDefs(defs, "__main__");
 }
 
 function createTagRegistry(entries) {
@@ -421,6 +543,8 @@ export {
   ARTIFACT_VERSION,
   METADATA_SECTION,
   appendCustomSection,
+  compileWasmArtifactFromKVM,
+  compileWasmArtifactFromObject,
   compileWasmArtifact,
   metadataFromModule,
   readArenaValue,
@@ -433,6 +557,8 @@ export default {
   ARTIFACT_VERSION,
   METADATA_SECTION,
   appendCustomSection,
+  compileWasmArtifactFromKVM,
+  compileWasmArtifactFromObject,
   compileWasmArtifact,
   metadataFromModule,
   readArenaValue,
