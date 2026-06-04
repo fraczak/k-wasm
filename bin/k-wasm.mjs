@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import { argv, exit, stdin, stdout } from "node:process";
+import { decodeWire } from "@fraczak/k/backend-api.mjs";
 
 import {
   compileProgramInput,
@@ -13,14 +14,13 @@ import { runWasmArtifact } from "../src/wasm.mjs";
 
 function usage(stream = console.error) {
   const prog = argv[1] || "k-wasm.mjs";
-  stream(`Usage: node ${prog} [options] ( source-snippet | input-file | -k file ) [ input-file ]`);
+  stream(`Usage: node ${prog} [options] ( source-snippet | input-file ) [ input-file ]`);
   stream("Compile k source, .ko, or .kvm input to WebAssembly in memory and run it over a binary pattern+value stream.");
   stream("");
   stream("Options:");
   stream("  --lib file       Load a .klib dependency before compiling. May be repeated.");
   stream("  --export spec    Export a library alias into source scope. May be repeated.");
   stream("                   spec is 'name' or 'libname:localname'.");
-  stream("  -k file          Read k source from file. Kept for compatibility.");
   stream("  -h, --help       Show this help.");
 }
 
@@ -37,7 +37,8 @@ async function main() {
   if (args.length > 0) throw new Error("Too many arguments");
 
   const inputBuffer = await readAll(inputPath == null ? stdin : fs.createReadStream(inputPath));
-  const artifact = await compileProgramInput(programInput, { libraries, exportSpecs });
+  const { pattern: inputEnvelopePattern } = decodeWire(inputBuffer);
+  const artifact = await compileProgramInput(programInput, { libraries, exportSpecs, inputEnvelopePattern });
   stdout.write(await runWasmArtifact(artifact, inputBuffer));
 }
 

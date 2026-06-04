@@ -87,6 +87,10 @@ k-unit --parse |
   k-print
 ```
 
+For compile inputs, existing paths are read as files. Missing names with
+`.k`, `.ko`, `.kvm`, `.klib`, or `.wasm` extensions are reported as missing
+files; other arguments are interpreted as inline source snippets.
+
 ## Read Input from a File
 
 Both runners accept an optional binary input file:

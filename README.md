@@ -69,9 +69,10 @@ All commands accept `--help`. The compile commands follow the `k-compile`
 input convention: pass inline source, an existing source path, a `.ko` object,
 or a `.kvm` program. They also accept repeated `--lib` options for `.klib`
 dependencies and repeated `--export` options to bring library aliases into the
-source scope. The older `-k file` form still works for source files. The
-runners read a binary input stream from standard input unless an input file is
-given.
+source scope. Existing paths are treated as files; non-existing names with
+`.k`, `.ko`, `.kvm`, `.klib`, or `.wasm` extensions are treated as missing
+files; other arguments are treated as inline source. The runners read a binary
+input stream from standard input unless an input file is given.
 
 ## Artifacts
 

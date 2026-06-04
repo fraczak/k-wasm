@@ -61,12 +61,6 @@ function resolveProgramInput(args, { allowStdinSource = false } = {}) {
     return { kind: "stdin-source", sourceName: "<stdin>" };
   }
 
-  if (inputArg === "-k") {
-    const sourcePath = args.shift();
-    if (!sourcePath) throw new Error("-k requires a file argument");
-    return { kind: "source-file", path: sourcePath, sourceName: sourcePath };
-  }
-
   const ext = path.extname(inputArg).toLowerCase();
   if (fs.existsSync(inputArg)) {
     const kind = fileInputType(inputArg);
@@ -83,12 +77,16 @@ function resolveProgramInput(args, { allowStdinSource = false } = {}) {
   return { kind: "inline-source", source: inputArg, sourceName: "<inline>" };
 }
 
-async function compileProgramInput(input, { libraries = [], exportSpecs = [], stdin = null } = {}) {
+async function compileProgramInput(
+  input,
+  { libraries = [], exportSpecs = [], stdin = null, inputEnvelopePattern = null } = {}
+) {
   if (input.kind === "inline-source") {
     return compileWasmArtifact(input.source, {
       libraries,
       exports: exportSpecs,
-      source: input.sourceName
+      source: input.sourceName,
+      inputEnvelopePattern
     });
   }
 
@@ -97,7 +95,8 @@ async function compileProgramInput(input, { libraries = [], exportSpecs = [], st
     return compileWasmArtifact((await readAll(stdin)).toString("utf8"), {
       libraries,
       exports: exportSpecs,
-      source: input.sourceName
+      source: input.sourceName,
+      inputEnvelopePattern
     });
   }
 
@@ -105,12 +104,15 @@ async function compileProgramInput(input, { libraries = [], exportSpecs = [], st
     return compileWasmArtifact(fs.readFileSync(input.path, "utf8"), {
       libraries,
       exports: exportSpecs,
-      source: input.sourceName
+      source: input.sourceName,
+      inputEnvelopePattern
     });
   }
 
   if (input.kind === "ko") {
-    return compileWasmArtifactFromObject(decodeObject(fs.readFileSync(input.path)));
+    return compileWasmArtifactFromObject(decodeObject(fs.readFileSync(input.path)), {
+      inputEnvelopePattern
+    });
   }
 
   if (input.kind === "kvm") {

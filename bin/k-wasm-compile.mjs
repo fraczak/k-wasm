@@ -23,7 +23,6 @@ function usage(stream = console.error) {
   stream("  --lib file       Load a .klib dependency before compiling. May be repeated.");
   stream("  --export spec    Export a library alias into source scope. May be repeated.");
   stream("                   spec is 'name' or 'libname:localname'.");
-  stream("  -k file          Read k source from file. Kept for compatibility.");
   stream("  -h, --help       Show this help.");
 }
 

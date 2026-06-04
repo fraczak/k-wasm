@@ -13,6 +13,12 @@ import {
   propertyListToPattern,
   Variant
 } from "@fraczak/k/backend-api.mjs";
+import { intersectPropertyListPatterns } from "@fraczak/k/codecs/runtime/codec.mjs";
+import { propertyListToFilter } from "@fraczak/k/codecs/runtime/show-value.mjs";
+import { parse } from "@fraczak/k/index.mjs";
+import { compileTypes } from "@fraczak/k/compiler.mjs";
+import codes from "@fraczak/k/codes.mjs";
+import { cloneSubpattern, withPattern } from "@fraczak/k/Value.mjs";
 import { lowerToWasm, getTagEntries, resetTagIds } from "./kvm2wasm.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -63,6 +69,100 @@ function scanCalls(insts, compiled, queue) {
       }
     }
   }
+}
+
+function injectLibraries(rels, libraries = []) {
+  for (const lib of libraries) {
+    const libRels = lib.rels || lib.defs?.rels || {};
+    for (const [name, rel] of Object.entries(libRels)) {
+      if (!(name in rels)) {
+        rels[name] = { ...rel, _library: true };
+      }
+    }
+  }
+}
+
+function cloneForRetyping(value) {
+  if (Array.isArray(value)) return value.map(cloneForRetyping);
+  if (!value || typeof value !== "object") return value;
+
+  const clone = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "patterns" || key.startsWith("_")) continue;
+    clone[key] = cloneForRetyping(child);
+  }
+  return clone;
+}
+
+function composeInputFilter(filterExp, exp) {
+  return {
+    op: "comp",
+    comp: [filterExp, exp],
+    ...(filterExp.start ? { start: filterExp.start } : exp.start ? { start: exp.start } : {}),
+    ...(exp.end ? { end: exp.end } : filterExp.end ? { end: filterExp.end } : {})
+  };
+}
+
+function compileParsedDefs(parsed, mainExp, options = {}) {
+  const representatives = codes.register(parsed.defs.codes || {});
+  const rels = Object.fromEntries(
+    Object.entries(parsed.defs.rels || {}).map(([name, rel]) => [
+      name,
+      { ...cloneForRetyping(rel), def: cloneForRetyping(rel.def) }
+    ])
+  );
+  rels.__main__ = { def: mainExp };
+  injectLibraries(rels, options.libraries);
+
+  const { relAlias, compileStats } = compileTypes(representatives, rels, options);
+  return {
+    rels,
+    representatives,
+    relAlias,
+    compileStats,
+    sourceDefs: parsed.defs
+  };
+}
+
+function compileObjectDefs(object, mainRelName, mainExp = null, options = {}) {
+  const representatives = codes.register(object.codes || {});
+  const rels = Object.fromEntries(
+    Object.entries(object.rels || {}).map(([name, rel]) => [
+      name,
+      { def: cloneForRetyping(name === mainRelName && mainExp ? mainExp : rel.def) }
+    ])
+  );
+  injectLibraries(rels, options.libraries);
+
+  const { relAlias, compileStats } = compileTypes(representatives, rels, options);
+  return {
+    rels,
+    representatives,
+    relAlias,
+    compileStats
+  };
+}
+
+function annotateSourceWithInputFilter(source, inputPattern, valuePattern, options = {}) {
+  const intersection = intersectInputEnvelope(inputPattern, valuePattern);
+  const filter = propertyListToFilter(intersection);
+  const parsed = parse(source);
+  const filterExp = parse(`?${filter}`).exp;
+  return compileParsedDefs(
+    parsed,
+    composeInputFilter(filterExp, cloneForRetyping(parsed.exp)),
+    options
+  );
+}
+
+function annotateObjectWithInputFilter(object, mainRelName, inputPattern, valuePattern, options = {}) {
+  const intersection = intersectInputEnvelope(inputPattern, valuePattern);
+  const filter = propertyListToFilter(intersection);
+  const filterExp = parse(`?${filter}`).exp;
+  const mainRel = object.rels?.[mainRelName];
+  if (!mainRel) throw new Error(`No main relation (${mainRelName}) defined in object`);
+  const mainExp = composeInputFilter(filterExp, cloneForRetyping(mainRel.def));
+  return compileObjectDefs(object, mainRelName, mainExp, options);
 }
 
 function cleanCallNames(insts) {
@@ -123,7 +223,10 @@ function compileModule(mainRelName, defs) {
     wats.push(lowerToWasm(kvmFunc, kvmFunc.name));
   }
 
-  return wats.join("\n\n");
+  return {
+    wat: wats.join("\n\n"),
+    relationNames: [...compiled]
+  };
 }
 
 function compileKVMModule(mainRelName, kvmProgram) {
@@ -213,6 +316,68 @@ function metadataFromModule(module) {
   return validateMetadata(JSON.parse(Buffer.from(sections[0]).toString("utf8")));
 }
 
+function isMonomorphicPattern(pattern) {
+  return Array.isArray(pattern) &&
+    pattern.length > 0 &&
+    pattern.every(([kind]) => kind === "closed-product" || kind === "closed-union");
+}
+
+function classifyTyping(inputPattern, outputPattern, status = "unknown", mode = "generic") {
+  const input = isMonomorphicPattern(inputPattern) ? "monomorphic" : "polymorphic";
+  const output = isMonomorphicPattern(outputPattern) ? "monomorphic" : "polymorphic";
+  return {
+    status,
+    mode,
+    input,
+    output,
+    program: input === "monomorphic" && output === "monomorphic" ? "monomorphic" : "polymorphic"
+  };
+}
+
+function compileStatsByRelName(compileStats = {}) {
+  const byName = new Map();
+  for (const scc of compileStats.sccs || []) {
+    for (const member of scc.members || []) {
+      byName.set(member, scc);
+    }
+  }
+  return byName;
+}
+
+function relTypeStatus(defs, name) {
+  const rel = defs.rels?.[name];
+  const explicit = rel?.typeDerivation?.status;
+  if (explicit) return explicit;
+  const scc = compileStatsByRelName(defs.compileStats).get(name);
+  if (scc) return scc.converged ? "converged" : "not-converged";
+  return "unknown";
+}
+
+function assertRelationsConverged(defs, relationNames) {
+  for (const name of relationNames) {
+    const status = relTypeStatus(defs, name);
+    if (status !== "converged") {
+      throw new Error(`Cannot compile '${name}' to WebAssembly: type derivation is ${status}`);
+    }
+  }
+}
+
+function intersectInputEnvelope(inputPattern, valuePattern) {
+  try {
+    return intersectPropertyListPatterns(inputPattern, valuePattern);
+  } catch (error) {
+    throw new TypeError(
+      "Input value envelope does not intersect WebAssembly artifact input pattern.\n" +
+      ` - input pattern: ${JSON.stringify(inputPattern)}\n` +
+      ` - value envelope: ${JSON.stringify(valuePattern)}`
+    );
+  }
+}
+
+function validateInputEnvelope(inputPattern, valuePattern) {
+  intersectInputEnvelope(inputPattern, valuePattern);
+}
+
 function buildExportPreamble(exportSpecs, libraries) {
   if (exportSpecs.length === 0) return "";
 
@@ -242,29 +407,37 @@ function buildExportPreamble(exportSpecs, libraries) {
   return lines.join("\n") + "\n";
 }
 
-async function compileWasmArtifactFromDefs(defs, mainRelName = "__main__") {
+async function compileWasmArtifactFromDefs(
+  defs,
+  mainRelName = "__main__",
+  { typingMode = "generic" } = {}
+) {
   resetTagIds();
   const mainRel = defs.rels[mainRelName];
   if (!mainRel) {
     throw new Error(`No main relation (${mainRelName}) defined in script`);
   }
 
-  const moduleWatBody = compileModule(mainRelName, defs);
+  const { wat: moduleWatBody, relationNames } = compileModule(mainRelName, defs);
+  assertRelationsConverged(defs, relationNames);
   const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + moduleWatBody + "\n)";
   const graph = mainRel.typePatternGraph;
+  const inputPattern = getPatternPropertyList(graph, mainRel.def.patterns[0]);
+  const outputPattern = getPatternPropertyList(graph, mainRel.def.patterns[1]);
   const metadata = {
     format: ARTIFACT_FORMAT,
     version: ARTIFACT_VERSION,
     abi: "arena-v1",
     entry: cleanName(mainRelName),
-    inputPattern: getPatternPropertyList(graph, mainRel.def.patterns[0]),
-    outputPattern: getPatternPropertyList(graph, mainRel.def.patterns[1]),
+    inputPattern,
+    outputPattern,
+    typing: classifyTyping(inputPattern, outputPattern, relTypeStatus(defs, mainRelName), typingMode),
     tags: getTagEntries()
   };
   return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
 }
 
-async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__" } = {}) {
+async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__", typingMode = "generic" } = {}) {
   resetTagIds();
   if (!kvmProgram || typeof kvmProgram !== "object" || Array.isArray(kvmProgram)) {
     throw new Error("Expected .kvm input to contain a JSON object of kVM functions");
@@ -287,25 +460,63 @@ async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__" } = {
     entry: cleanName(entry),
     inputPattern: mainFunc.inputPattern,
     outputPattern: mainFunc.outputPattern,
+    typing: classifyTyping(
+      mainFunc.inputPattern,
+      mainFunc.outputPattern,
+      mainFunc.isConverged ? "converged" : "unknown",
+      typingMode
+    ),
     tags: getTagEntries()
   };
   return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
 }
 
-async function compileWasmArtifactFromObject(object, { entry = null } = {}) {
+async function compileWasmArtifactFromObject(object, { entry = null, inputEnvelopePattern = null } = {}) {
   if (!object?.rels) {
     throw new Error("Expected .ko input to contain k object relations");
   }
   if (object.main == null) {
     throw new Error("Cannot compile a .klib library to WebAssembly without a main relation");
   }
-  return compileWasmArtifactFromDefs({ rels: object.rels }, entry || object.main || "__main__");
+  const mainRelName = entry || object.main || "__main__";
+  let defs = { rels: object.rels, compileStats: object.compileStats };
+  let typingMode = "generic";
+
+  if (inputEnvelopePattern) {
+    const mainRel = object.rels[mainRelName];
+    if (!mainRel) throw new Error(`No main relation (${mainRelName}) defined in object`);
+    const inputPattern = getPatternPropertyList(mainRel.typePatternGraph, mainRel.def.patterns[0]);
+    const outputPattern = getPatternPropertyList(mainRel.typePatternGraph, mainRel.def.patterns[1]);
+    if (classifyTyping(inputPattern, outputPattern).program === "polymorphic") {
+      defs = annotateObjectWithInputFilter(object, mainRelName, inputPattern, inputEnvelopePattern);
+      typingMode = "specialized";
+    }
+  }
+
+  return compileWasmArtifactFromDefs(defs, mainRelName, { typingMode });
 }
 
-async function compileWasmArtifact(source, { libraries = [], exports = [], source: sourceName = null } = {}) {
+async function compileWasmArtifact(
+  source,
+  { libraries = [], exports = [], source: sourceName = null, inputEnvelopePattern = null } = {}
+) {
   const preamble = buildExportPreamble(exports, libraries);
-  const defs = annotate(preamble + source, { libraries, ...(sourceName ? { source: sourceName } : {}) });
-  return compileWasmArtifactFromDefs(defs, "__main__");
+  const fullSource = preamble + source;
+  const options = { libraries, ...(sourceName ? { source: sourceName } : {}) };
+  let defs = annotate(fullSource, options);
+
+  let typingMode = "generic";
+  if (inputEnvelopePattern) {
+    const mainRel = defs.rels.__main__;
+    const inputPattern = getPatternPropertyList(mainRel.typePatternGraph, mainRel.def.patterns[0]);
+    const outputPattern = getPatternPropertyList(mainRel.typePatternGraph, mainRel.def.patterns[1]);
+    if (classifyTyping(inputPattern, outputPattern).program === "polymorphic") {
+      defs = annotateSourceWithInputFilter(fullSource, inputPattern, inputEnvelopePattern, options);
+      typingMode = "specialized";
+    }
+  }
+
+  return compileWasmArtifactFromDefs(defs, "__main__", { typingMode });
 }
 
 function createTagRegistry(entries) {
@@ -340,6 +551,24 @@ function createTagRegistry(entries) {
   };
 }
 
+function patternForNode(patternPropertyList, patternNodeId) {
+  if (!patternPropertyList || patternNodeId == null) return null;
+  const subpattern = cloneSubpattern(patternPropertyList, patternNodeId);
+  return subpattern?.[0]?.[0] === "any" ? null : subpattern;
+}
+
+function valueWithPatternNode(value, patternPropertyList, patternNodeId) {
+  const pattern = patternForNode(patternPropertyList, patternNodeId);
+  return pattern ? withPattern(value, pattern) : value;
+}
+
+function constrainArenaValue(value, patternPropertyList, patternNodeId) {
+  const staticPattern = patternForNode(patternPropertyList, patternNodeId);
+  if (!staticPattern) return value;
+  if (!value.pattern) return withPattern(value, staticPattern);
+  return withPattern(value, intersectInputEnvelope(staticPattern, value.pattern));
+}
+
 function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyList, arenaValues, tags) {
   let result;
   const stack = [{
@@ -355,27 +584,22 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
     const patternNode = pattern.nodes[frame.patternNodeId];
     const view = new DataView(exports.memory.buffer);
 
-    if (patternNode.kind === NODE_KIND.ANY) {
-      const value = arenaValues.get(frame.ptr);
-      if (value === undefined) {
-        throw new Error(`Cannot decode arena pointer ${frame.ptr} through an unconstrained output pattern`);
-      }
-      frame.assign(value);
+    if (arenaValues.has(frame.ptr)) {
+      frame.assign(constrainArenaValue(arenaValues.get(frame.ptr), patternPropertyList, frame.patternNodeId));
       continue;
+    }
+
+    if (patternNode.kind === NODE_KIND.ANY) {
+      throw new Error(`Cannot decode arena pointer ${frame.ptr} through an unconstrained output pattern`);
     }
 
     if (patternNode.kind === NODE_KIND.OPEN_PRODUCT || patternNode.kind === NODE_KIND.CLOSED_PRODUCT) {
       const N = view.getUint32(frame.ptr + 4, true);
       if (N !== patternNode.edges.length) {
-        const value = arenaValues.get(frame.ptr);
-        if (value !== undefined) {
-          frame.assign(value);
-          continue;
-        }
         throw new Error(`Cannot decode product pointer ${frame.ptr}: arena field count ${N} does not match output pattern`);
       }
       const product = {};
-      frame.assign(new Product(product, patternPropertyList));
+      frame.assign(new Product(product, patternForNode(patternPropertyList, frame.patternNodeId)));
       for (let i = N - 1; i >= 0; i--) {
         const edge = patternNode.edges[i];
         const offset = view.getUint32(frame.ptr + 8 + 4 * i, true);
@@ -395,15 +619,10 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
       const tag = tags.getTag(view.getUint32(frame.ptr + 4, true));
       const edge = patternNode.edges.find((candidate) => candidate.label === tag);
       if (!edge) {
-        const value = arenaValues.get(frame.ptr);
-        if (value !== undefined) {
-          frame.assign(value);
-          continue;
-        }
         throw new Error(`Variant tag '${tag}' not found in output pattern edges`);
       }
       const payloadPtr = view.getUint32(frame.ptr + 8, true);
-      const variant = new Variant(tag, undefined, patternPropertyList);
+      const variant = new Variant(tag, undefined, patternForNode(patternPropertyList, frame.patternNodeId));
       frame.assign(variant);
       stack.push({
         ptr: payloadPtr,
@@ -421,7 +640,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
   return result;
 }
 
-function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, tags) {
+function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, tags, patternPropertyList = null) {
   let result;
   const stack = [{
     value,
@@ -444,7 +663,7 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
         view.setUint32(frame.ptr + 8 + 4 * i, offset, true);
         view.setUint32(frame.ptr + offset, frame.childPtrs[i], true);
       }
-      arenaValues.set(frame.ptr, frame.value);
+      arenaValues.set(frame.ptr, valueWithPatternNode(frame.value, patternPropertyList, frame.patternNodeId));
       frame.assign(frame.ptr);
       continue;
     }
@@ -455,33 +674,54 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
       view.setUint32(ptr, 12, true);
       view.setUint32(ptr + 4, tags.getId(frame.value.tag), true);
       view.setUint32(ptr + 8, frame.childPtr, true);
-      arenaValues.set(ptr, frame.value);
+      arenaValues.set(ptr, valueWithPatternNode(frame.value, patternPropertyList, frame.patternNodeId));
       frame.assign(ptr);
       continue;
     }
 
-    const patternNode = pattern.nodes[frame.patternNodeId];
+    const patternNode = frame.patternNodeId == null ? null : pattern.nodes[frame.patternNodeId];
     if (frame.value instanceof Product) {
-      const isAny = patternNode.kind === NODE_KIND.ANY;
-      const keys = Object.keys(frame.value.product).sort();
-      const childPtrs = new Array(keys.length);
-      const ptr = exports.alloc(8 + 8 * keys.length);
+      const isAny = patternNode == null || patternNode.kind === NODE_KIND.ANY;
+      const isOpenProduct = patternNode?.kind === NODE_KIND.OPEN_PRODUCT;
+      const isClosedProduct = patternNode?.kind === NODE_KIND.CLOSED_PRODUCT;
+      if (!isAny && !isOpenProduct && !isClosedProduct) {
+        throw new Error(`Cannot encode product value through input pattern node ${frame.patternNodeId}`);
+      }
+
+      const fields = isAny
+        ? Object.keys(frame.value.product)
+            .sort()
+            .map((label) => ({ label, patternNodeId: frame.patternNodeId }))
+        : patternNode.edges.map((edge) => ({ label: edge.label, patternNodeId: edge.target }));
+      const fieldLabels = new Set(fields.map(({ label }) => label));
+      if (isClosedProduct) {
+        for (const label of Object.keys(frame.value.product)) {
+          if (!fieldLabels.has(label)) {
+            throw new Error(`Product field '${label}' is not present in input pattern node ${frame.patternNodeId}`);
+          }
+        }
+      }
+      for (const { label } of fields) {
+        if (!Object.hasOwn(frame.value.product, label)) {
+          throw new Error(`Product field '${label}' is required by input pattern node ${frame.patternNodeId}`);
+        }
+      }
+
+      const childPtrs = new Array(fields.length);
+      const ptr = exports.alloc(8 + 8 * fields.length);
       stack.push({
         finishProduct: true,
         value: frame.value,
+        patternNodeId: frame.patternNodeId,
         ptr,
         childPtrs,
         assign: frame.assign
       });
-      for (let i = keys.length - 1; i >= 0; i--) {
-        const label = keys[i];
-        const edge = isAny ? null : patternNode.edges.find((candidate) => candidate.label === label);
-        if (!isAny && !edge) {
-          throw new Error(`Product field '${label}' is not present in input pattern node ${frame.patternNodeId}`);
-        }
+      for (let i = fields.length - 1; i >= 0; i--) {
+        const field = fields[i];
         stack.push({
-          value: frame.value.product[label],
-          patternNodeId: isAny ? frame.patternNodeId : edge.target,
+          value: frame.value.product[field.label],
+          patternNodeId: field.patternNodeId,
           assign(ptr) {
             childPtrs[i] = ptr;
           }
@@ -491,21 +731,28 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
     }
 
     if (frame.value instanceof Variant) {
-      const isAny = patternNode.kind === NODE_KIND.ANY;
+      const isAny = patternNode == null || patternNode.kind === NODE_KIND.ANY;
+      const isOpenUnion = patternNode?.kind === NODE_KIND.OPEN_UNION;
+      const isClosedUnion = patternNode?.kind === NODE_KIND.CLOSED_UNION;
+      if (!isAny && !isOpenUnion && !isClosedUnion) {
+        throw new Error(`Cannot encode variant value through input pattern node ${frame.patternNodeId}`);
+      }
+
       const edge = isAny ? null : patternNode.edges.find((candidate) => candidate.label === frame.value.tag);
-      if (!isAny && !edge) {
+      if (isClosedUnion && !edge) {
         throw new Error(`Variant tag '${frame.value.tag}' is not present in input pattern node ${frame.patternNodeId}`);
       }
       const variantFrame = {
         finishVariant: true,
         value: frame.value,
+        patternNodeId: frame.patternNodeId,
         childPtr: null,
         assign: frame.assign
       };
       stack.push(variantFrame);
       stack.push({
         value: frame.value.value,
-        patternNodeId: isAny ? frame.patternNodeId : edge.target,
+        patternNodeId: edge ? edge.target : null,
         assign(ptr) {
           variantFrame.childPtr = ptr;
         }
@@ -527,9 +774,12 @@ async function runWasmArtifact(wasmBuffer, inputBuffer) {
   const tags = createTagRegistry(metadata.tags);
   const inputPattern = propertyListToPattern(metadata.inputPattern);
   const outputPattern = propertyListToPattern(metadata.outputPattern);
-  const { value } = decodeWire(inputBuffer);
+  const { pattern: valuePattern, value } = decodeWire(inputBuffer);
+  if (!isMonomorphicPattern(metadata.inputPattern)) {
+    validateInputEnvelope(metadata.inputPattern, valuePattern);
+  }
   const arenaValues = new Map();
-  const ptrIn = writeValueToArena(exports, value, inputPattern, 0, arenaValues, tags);
+  const ptrIn = writeValueToArena(exports, value, inputPattern, 0, arenaValues, tags, metadata.inputPattern);
   const result = exports[metadata.entry](ptrIn);
   if (result[1] !== 1) {
     throw new Error("Wasm relation execution failed (returned false)");
