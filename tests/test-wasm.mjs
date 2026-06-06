@@ -320,11 +320,12 @@ console.log("==> Running Union & Choice Integration Tests");
 import {
   exportPatternGraph,
   fromObject,
+  isProduct,
+  isVariant,
   NODE_KIND,
   patternToPropertyList,
-  Product,
   propertyListToPattern,
-  Variant
+  Value
 } from "@fraczak/k/backend-api.mjs";
 import { getTagFromId } from "../src/kvm2wasm.mjs";
 import { readArenaValue, writeValueToArena } from "../src/wasm.mjs";
@@ -387,11 +388,11 @@ console.log("==> Running Stack-Safe Arena Serialization Tests");
 
   assertDeepValue(readArenaValue({ memory }, ptr, pattern, 0, propertyList, new Map(), tags));
 
-  let input = new Variant("_", new Product({}));
+  let input = Value.variant("_", Value.product({}));
   for (let i = 0; i < depth; i++) {
-    input = new Variant("1", input);
+    input = Value.variant("1", input);
   }
-  input = new Variant("+", input);
+  input = Value.variant("+", input);
 
   free = 1024;
   const exports = {
@@ -456,7 +457,7 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
         const childPtr = view.getUint32(ptr + offsetVal, true);
         productObj[edge.label] = readArenaValue(childPtr, pattern, edge.target);
       }
-      return new Product(productObj, pattern);
+      return Value.product(productObj, pattern);
     } else if (patternNode.kind === 2 || patternNode.kind === 4) { // OPEN_UNION or CLOSED_UNION
       const size = view.getUint32(ptr, true);
       const tagId = view.getUint32(ptr + 4, true);
@@ -468,7 +469,7 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
         throw new Error(`Variant tag '${tag}' not found in pattern edges`);
       }
       const payloadVal = readArenaValue(payloadPtr, pattern, edge.target);
-      return new Variant(tag, payloadVal, pattern);
+      return Value.variant(tag, payloadVal, pattern);
     }
     throw new Error(`Unsupported pattern kind: ${patternNode.kind}`);
   }
@@ -477,7 +478,7 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
   function writeValueToArena(value, pattern, patternNodeId) {
     const patternNode = pattern.nodes[patternNodeId];
 
-    if (value instanceof Product) {
+    if (isProduct(value)) {
       const keys = Object.keys(value.product).sort();
       const N = keys.length;
       const totalSize = 8 + 8 * N;
@@ -503,7 +504,7 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
         view.setUint32(ptr + offsetVal, childPtrs[i], true);
       }
       return ptr;
-    } else if (value instanceof Variant) {
+    } else if (isVariant(value)) {
       const tagId = getTagId(value.tag);
       const edge = patternNode.edges.find(e => e.label === value.tag);
       const childPtr = writeValueToArena(value.value, pattern, edge.target);

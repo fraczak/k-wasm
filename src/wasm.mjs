@@ -6,12 +6,13 @@ import {
   decodeWire,
   encodeToWire,
   exportPatternGraph,
+  isProduct,
+  isVariant,
   lowerToKVM,
   NODE_KIND,
   patternToPropertyList,
-  Product,
   propertyListToPattern,
-  Variant
+  Value
 } from "@fraczak/k/backend-api.mjs";
 import { intersectPropertyListPatterns } from "@fraczak/k/codecs/runtime/codec.mjs";
 import { propertyListToFilter } from "@fraczak/k/codecs/runtime/show-value.mjs";
@@ -599,7 +600,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
         throw new Error(`Cannot decode product pointer ${frame.ptr}: arena field count ${N} does not match output pattern`);
       }
       const product = {};
-      frame.assign(new Product(product, patternForNode(patternPropertyList, frame.patternNodeId)));
+      frame.assign(Value.product(product, patternForNode(patternPropertyList, frame.patternNodeId)));
       for (let i = N - 1; i >= 0; i--) {
         const edge = patternNode.edges[i];
         const offset = view.getUint32(frame.ptr + 8 + 4 * i, true);
@@ -622,7 +623,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
         throw new Error(`Variant tag '${tag}' not found in output pattern edges`);
       }
       const payloadPtr = view.getUint32(frame.ptr + 8, true);
-      const variant = new Variant(tag, undefined, patternForNode(patternPropertyList, frame.patternNodeId));
+      const variant = Value.variant(tag, undefined, patternForNode(patternPropertyList, frame.patternNodeId));
       frame.assign(variant);
       stack.push({
         ptr: payloadPtr,
@@ -680,7 +681,7 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
     }
 
     const patternNode = frame.patternNodeId == null ? null : pattern.nodes[frame.patternNodeId];
-    if (frame.value instanceof Product) {
+    if (isProduct(frame.value)) {
       const isAny = patternNode == null || patternNode.kind === NODE_KIND.ANY;
       const isOpenProduct = patternNode?.kind === NODE_KIND.OPEN_PRODUCT;
       const isClosedProduct = patternNode?.kind === NODE_KIND.CLOSED_PRODUCT;
@@ -730,7 +731,7 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
       continue;
     }
 
-    if (frame.value instanceof Variant) {
+    if (isVariant(frame.value)) {
       const isAny = patternNode == null || patternNode.kind === NODE_KIND.ANY;
       const isOpenUnion = patternNode?.kind === NODE_KIND.OPEN_UNION;
       const isClosedUnion = patternNode?.kind === NODE_KIND.CLOSED_UNION;

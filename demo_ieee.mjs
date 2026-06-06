@@ -8,14 +8,15 @@ import {
   executeKVM,
   exportPatternGraph,
   fromObject,
+  isProduct,
+  isVariant,
   lowerToKVM,
   parseFloat64,
   patternToPropertyList,
   printFloat64,
-  Product,
   propertyListToPattern,
   valueForCode,
-  Variant
+  Value
 } from "@fraczak/k/backend-api.mjs";
 import { lowerToWasm, getTagId, getTagFromId, getFuncNameFromId } from "./src/kvm2wasm.mjs";
 
@@ -187,7 +188,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId) {
       const childPtr = view.getUint32(ptr + offsetVal, true);
       productObj[edge.label] = readArenaValue(exports, childPtr, pattern, edge.target);
     }
-    return new Product(productObj, pattern);
+    return Value.product(productObj, pattern);
   } else if (patternNode.kind === 2 || patternNode.kind === 4) {
     const size = view.getUint32(ptr, true);
     const tagId = view.getUint32(ptr + 4, true);
@@ -200,7 +201,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId) {
       throw new Error(`Variant tag '${tag}' not found in pattern edges`);
     }
     const payloadVal = readArenaValue(exports, payloadPtr, pattern, edge.target);
-    return new Variant(tag, payloadVal, pattern);
+    return Value.variant(tag, payloadVal, pattern);
   }
   throw new Error(`Unsupported pattern kind: ${patternNode.kind}`);
 }
@@ -208,7 +209,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId) {
 function writeValueToArena(value, pattern, patternNodeId) {
   const patternNode = pattern.nodes[patternNodeId];
 
-  if (value instanceof Product) {
+  if (isProduct(value)) {
     const keys = Object.keys(value.product).sort();
     const N = keys.length;
     const totalSize = 8 + 8 * N;
@@ -234,7 +235,7 @@ function writeValueToArena(value, pattern, patternNodeId) {
       view.setUint32(ptr + offsetVal, childPtrs[i], true);
     }
     return ptr;
-  } else if (value instanceof Variant) {
+  } else if (isVariant(value)) {
     const tagId = getTagId(value.tag);
     const edge = patternNode.edges.find(e => e.label === value.tag);
     const childPtr = writeValueToArena(value.value, pattern, edge.target);

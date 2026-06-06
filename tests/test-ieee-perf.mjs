@@ -11,15 +11,16 @@ import {
   evaluateInput,
   executeKVM,
   exportPatternGraph,
+  isProduct,
+  isVariant,
   lowerToKVM,
   parseFloat64,
   patternToPropertyList,
-  Product,
   propertyListToPattern,
   run,
   run_converged,
   valueForCode,
-  Variant
+  Value
 } from "@fraczak/k/backend-api.mjs";
 import { lowerToWasm, getTagId, getTagFromId } from "../src/kvm2wasm.mjs";
 
@@ -135,7 +136,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
       const childPtr = view.getUint32(ptr + offsetVal, true);
       productObj[edge.label] = readArenaValue(exports, childPtr, pattern, edge.target, patternPropertyList);
     }
-    return new Product(productObj, patternPropertyList);
+    return Value.product(productObj, patternPropertyList);
   } else if (patternNode.kind === 2 || patternNode.kind === 4) {
     const size = view.getUint32(ptr, true);
     const tagId = view.getUint32(ptr + 4, true);
@@ -147,7 +148,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
       throw new Error(`Variant tag '${tag}' not found in pattern edges`);
     }
     const payloadVal = readArenaValue(exports, payloadPtr, pattern, edge.target, patternPropertyList);
-    return new Variant(tag, payloadVal, patternPropertyList);
+    return Value.variant(tag, payloadVal, patternPropertyList);
   }
   throw new Error(`Unsupported pattern kind: ${patternNode.kind}`);
 }
@@ -155,7 +156,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
 function writeValueToArena(exports, value, pattern, patternNodeId) {
   const patternNode = pattern.nodes[patternNodeId];
 
-  if (value instanceof Product) {
+  if (isProduct(value)) {
     const keys = Object.keys(value.product).sort();
     const N = keys.length;
     const totalSize = 8 + 8 * N;
@@ -181,7 +182,7 @@ function writeValueToArena(exports, value, pattern, patternNodeId) {
       view.setUint32(ptr + offsetVal, childPtrs[i], true);
     }
     return ptr;
-  } else if (value instanceof Variant) {
+  } else if (isVariant(value)) {
     const tagId = getTagId(value.tag);
     const edge = patternNode.edges.find(e => e.label === value.tag);
     const childPtr = writeValueToArena(exports, value.value, pattern, edge.target);
@@ -216,7 +217,7 @@ function float64(text) {
 }
 
 function floatPair(x, y) {
-  return valueForCode(new Product({
+  return valueForCode(Value.product({
     x: float64(x),
     y: float64(y)
   }), floatPairHash, codes.find);
