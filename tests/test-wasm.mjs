@@ -319,6 +319,8 @@ console.log("==> Running Union & Choice Integration Tests");
 
 import {
   exportPatternGraph,
+  decodeWire,
+  encodeToWire,
   fromObject,
   isProduct,
   isVariant,
@@ -328,7 +330,7 @@ import {
   Value
 } from "@fraczak/k/backend-api.mjs";
 import { getTagFromId } from "../src/kvm2wasm.mjs";
-import { readArenaValue, writeValueToArena } from "../src/wasm.mjs";
+import { appendCustomSection, readArenaValue, runWasmArtifact, writeValueToArena } from "../src/wasm.mjs";
 
 console.log("==> Running Stack-Safe Arena Serialization Tests");
 {
@@ -549,6 +551,68 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
   assert.deepEqual(valOutput.toJSON(), { "+1": { "+1": { "+1": "0" } } }, "Addition of 2 and 1 must equal 3");
 
   console.log("End-to-End Peano Addition & Serialization tests passed successfully!");
+}
+
+console.log("==> Running kVM Fallback Stack Overflow Test");
+{
+  const unitPattern = [["closed-product", []]];
+  const entry = "rel___main__";
+  const recursiveWat = `
+    (module
+      (memory (export "memory") 1)
+      (global $arena_free (mut i32) (i32.const 1024))
+      (global $arena_max (mut i32) (i32.const 65536))
+      (func $alloc (export "alloc") (param $size i32) (result i32)
+        i32.const 1024
+      )
+      (func $arena_mark (export "arena_mark") (result i32)
+        global.get $arena_free
+      )
+      (func $arena_reset (export "arena_reset") (param $mark i32))
+      (func $${entry} (export "${entry}") (param $in i32) (result i32 i32)
+        local.get $in
+        call $${entry}
+      )
+    )
+  `;
+  const metadata = {
+    format: "k-wasm",
+    version: 1,
+    abi: "arena-v1",
+    entry,
+    inputPattern: unitPattern,
+    outputPattern: unitPattern,
+    typing: {
+      status: "converged",
+      mode: "generic",
+      input: "monomorphic",
+      output: "monomorphic",
+      program: "monomorphic"
+    },
+    tags: [],
+    kvmProgram: {
+      [entry]: {
+        name: entry,
+        inputPattern: unitPattern,
+        outputPattern: unitPattern,
+        isConverged: true,
+        body: [
+          { op: "id", dest: "%v0", src: "%in" },
+          { op: "return", src: "%v0" }
+        ]
+      }
+    }
+  };
+  const wasm = appendCustomSection(
+    Buffer.from(compileWat("recursive-fallback.wat", recursiveWat)),
+    "k.metadata",
+    JSON.stringify(metadata)
+  );
+  const input = Value.product({}, unitPattern);
+  const output = await runWasmArtifact(wasm, encodeToWire(input, unitPattern));
+  const decoded = decodeWire(output);
+  assert.deepEqual(decoded.value.toJSON(), {});
+  console.log("kVM fallback stack overflow test passed successfully!");
 }
 
 console.log("==> Harness ready.");

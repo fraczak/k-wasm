@@ -126,9 +126,9 @@ before producing WebAssembly.
 
 ## Compile with Libraries
 
-`k-wasm-compile` and `k-wasm` accept repeated `--lib` options before the
-program. Use repeated `--export` options to bring aliases from those libraries
-into the source scope. The export spec is `name` or `libname:localname`.
+`k-wasm-compile` and `k-wasm` accept one `--lib` option before the program.
+Use repeated `--export` options to bring aliases from that library into the
+source scope. The export spec is `name` or `libname:localname`.
 
 For a library that defines `transform`:
 

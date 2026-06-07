@@ -67,8 +67,8 @@ k-unit --parse | k-wasm-run /tmp/ok.wasm | k-print
 
 All commands accept `--help`. The compile commands follow the `k-compile`
 input convention: pass inline source, an existing source path, a `.ko` object,
-or a `.kvm` program. They also accept repeated `--lib` options for `.klib`
-dependencies and repeated `--export` options to bring library aliases into the
+or a `.kvm` program. They also accept one `--lib` option for a `.klib`
+dependency and repeated `--export` options to bring library aliases into the
 source scope. Existing paths are treated as files; non-existing names with
 `.k`, `.ko`, `.kvm`, `.klib`, or `.wasm` extensions are treated as missing
 files; other arguments are treated as inline source. The runners read a binary

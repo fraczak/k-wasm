@@ -9,6 +9,7 @@ import {
   isProduct,
   isVariant,
   lowerToKVM,
+  executeKVM,
   NODE_KIND,
   patternToPropertyList,
   propertyListToPattern,
@@ -200,10 +201,37 @@ function cloneKVMFunction(kvmFunc) {
   };
 }
 
+function serializeKVMInstructions(insts) {
+  return insts.map((inst) => ({
+    ...Object.fromEntries(
+      Object.entries(inst).filter(([key]) => key !== "exp" && key !== "typePatternGraph")
+    ),
+    ...(inst.branches
+      ? {
+          branches: inst.branches.map((branch) => ({
+            label: branch.label,
+            body: serializeKVMInstructions(branch.body)
+          }))
+        }
+      : {})
+  }));
+}
+
+function serializeKVMFunction(kvmFunc) {
+  return {
+    name: kvmFunc.name,
+    inputPattern: kvmFunc.inputPattern,
+    outputPattern: kvmFunc.outputPattern,
+    isConverged: kvmFunc.isConverged,
+    body: serializeKVMInstructions(kvmFunc.body)
+  };
+}
+
 function compileModule(mainRelName, defs) {
   const compiled = new Set();
   const queue = [mainRelName];
   const wats = [];
+  const kvmProgram = {};
 
   while (queue.length > 0) {
     const name = queue.shift();
@@ -222,11 +250,13 @@ function compileModule(mainRelName, defs) {
     kvmFunc.name = cleanName(name);
     cleanCallNames(kvmFunc.body);
     wats.push(lowerToWasm(kvmFunc, kvmFunc.name));
+    kvmProgram[kvmFunc.name] = serializeKVMFunction(kvmFunc);
   }
 
   return {
     wat: wats.join("\n\n"),
-    relationNames: [...compiled]
+    relationNames: [...compiled],
+    kvmProgram
   };
 }
 
@@ -234,6 +264,7 @@ function compileKVMModule(mainRelName, kvmProgram) {
   const compiled = new Set();
   const queue = [mainRelName];
   const wats = [];
+  const fallbackKVMProgram = {};
   const cleanKVMProgram = Object.fromEntries(
     Object.entries(kvmProgram).map(([name, kvmFunc]) => [cleanName(name), kvmFunc])
   );
@@ -254,9 +285,13 @@ function compileKVMModule(mainRelName, kvmProgram) {
     kvmFunc.name = cleanName(name);
     cleanCallNames(kvmFunc.body);
     wats.push(lowerToWasm(kvmFunc, kvmFunc.name, { kvmProgram: cleanKVMProgram }));
+    fallbackKVMProgram[kvmFunc.name] = serializeKVMFunction(kvmFunc);
   }
 
-  return wats.join("\n\n");
+  return {
+    wat: wats.join("\n\n"),
+    kvmProgram: fallbackKVMProgram
+  };
 }
 
 function getPatternPropertyList(graph, patternId) {
@@ -303,6 +338,14 @@ function validateMetadata(metadata) {
   }
   if (!Array.isArray(metadata.tags)) {
     throw new Error("WebAssembly artifact metadata is missing its tag table");
+  }
+  if (metadata.kvmProgram != null) {
+    if (typeof metadata.kvmProgram !== "object" || Array.isArray(metadata.kvmProgram)) {
+      throw new Error("WebAssembly artifact metadata contains an invalid kVM fallback program");
+    }
+    if (!metadata.kvmProgram[metadata.entry]) {
+      throw new Error("WebAssembly artifact metadata kVM fallback program is missing its entry point");
+    }
   }
   propertyListToPattern(metadata.inputPattern);
   propertyListToPattern(metadata.outputPattern);
@@ -419,7 +462,7 @@ async function compileWasmArtifactFromDefs(
     throw new Error(`No main relation (${mainRelName}) defined in script`);
   }
 
-  const { wat: moduleWatBody, relationNames } = compileModule(mainRelName, defs);
+  const { wat: moduleWatBody, relationNames, kvmProgram } = compileModule(mainRelName, defs);
   assertRelationsConverged(defs, relationNames);
   const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + moduleWatBody + "\n)";
   const graph = mainRel.typePatternGraph;
@@ -433,7 +476,8 @@ async function compileWasmArtifactFromDefs(
     inputPattern,
     outputPattern,
     typing: classifyTyping(inputPattern, outputPattern, relTypeStatus(defs, mainRelName), typingMode),
-    tags: getTagEntries()
+    tags: getTagEntries(),
+    kvmProgram
   };
   return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
 }
@@ -452,7 +496,7 @@ async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__", typi
     throw new Error(`kVM entry function (${entry}) is missing input/output patterns`);
   }
 
-  const moduleWatBody = compileKVMModule(entry, kvmProgram);
+  const { wat: moduleWatBody, kvmProgram: fallbackKVMProgram } = compileKVMModule(entry, kvmProgram);
   const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + moduleWatBody + "\n)";
   const metadata = {
     format: ARTIFACT_FORMAT,
@@ -467,7 +511,8 @@ async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__", typi
       mainFunc.isConverged ? "converged" : "unknown",
       typingMode
     ),
-    tags: getTagEntries()
+    tags: getTagEntries(),
+    kvmProgram: fallbackKVMProgram
   };
   return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
 }
@@ -767,6 +812,31 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
   return result;
 }
 
+function isCallStackOverflow(error) {
+  return error instanceof RangeError &&
+    String(error.message || "").includes("Maximum call stack size exceeded");
+}
+
+function runKVMFallback(metadata, value) {
+  const entry = metadata.kvmProgram?.[metadata.entry];
+  if (!entry) {
+    throw new Error("WebAssembly stack overflowed and no kVM fallback entry is available");
+  }
+
+  const rels = Object.fromEntries(
+    Object.entries(metadata.kvmProgram).map(([name, kvmFunc]) => [name, { _kvmFunc: kvmFunc }])
+  );
+  const result = executeKVM(entry, value, {
+    rels,
+    findCode: codes.find,
+    options: { envelopeFree: true }
+  });
+  if (result === undefined) {
+    throw new Error("kVM fallback relation execution failed");
+  }
+  return encodeToWire(result, result.pattern || metadata.outputPattern);
+}
+
 async function runWasmArtifact(wasmBuffer, inputBuffer) {
   const module = await WebAssembly.compile(wasmBuffer);
   const metadata = metadataFromModule(module);
@@ -781,7 +851,15 @@ async function runWasmArtifact(wasmBuffer, inputBuffer) {
   }
   const arenaValues = new Map();
   const ptrIn = writeValueToArena(exports, value, inputPattern, 0, arenaValues, tags, metadata.inputPattern);
-  const result = exports[metadata.entry](ptrIn);
+  let result;
+  try {
+    result = exports[metadata.entry](ptrIn);
+  } catch (error) {
+    if (isCallStackOverflow(error) && metadata.kvmProgram) {
+      return runKVMFallback(metadata, value);
+    }
+    throw error;
+  }
   if (result[1] !== 1) {
     throw new Error("Wasm relation execution failed (returned false)");
   }

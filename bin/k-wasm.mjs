@@ -18,7 +18,7 @@ function usage(stream = console.error) {
   stream("Compile k source, .ko, or .kvm input to WebAssembly in memory and run it over a binary pattern+value stream.");
   stream("");
   stream("Options:");
-  stream("  --lib file       Load a .klib dependency before compiling. May be repeated.");
+  stream("  --lib file       Load one .klib dependency before compiling.");
   stream("  --export spec    Export a library alias into source scope. May be repeated.");
   stream("                   spec is 'name' or 'libname:localname'.");
   stream("  -h, --help       Show this help.");

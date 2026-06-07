@@ -20,6 +20,7 @@ function readAll(stream) {
 function parseCompileOptions(args) {
   const libraries = [];
   const exportSpecs = [];
+  let loadedLibrary = false;
 
   while (args.length > 0) {
     if (args[0] === "--") {
@@ -27,10 +28,12 @@ function parseCompileOptions(args) {
       break;
     }
     if (args[0] === "--lib") {
+      if (loadedLibrary) throw new Error("--lib may only be specified once");
       args.shift();
       const libPath = args.shift();
       if (!libPath) throw new Error("--lib requires a file argument");
       libraries.push(loadLibrary(decodeObject(fs.readFileSync(libPath))));
+      loadedLibrary = true;
     } else if (args[0] === "--export") {
       args.shift();
       const spec = args.shift();
