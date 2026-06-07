@@ -20,7 +20,7 @@ function usage(stream = console.error) {
   stream("  wasm-file       Output .wasm path. Writes the binary artifact to stdout when omitted.");
   stream("");
   stream("Options:");
-  stream("  --lib file       Load a .klib dependency before compiling. May be repeated.");
+  stream("  --lib file       Load one .klib dependency before compiling.");
   stream("  --export spec    Export a library alias into source scope. May be repeated.");
   stream("                   spec is 'name' or 'libname:localname'.");
   stream("  -h, --help       Show this help.");

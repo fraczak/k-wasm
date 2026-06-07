@@ -14,7 +14,6 @@ import {
   isProduct,
   isVariant,
   lowerToKVM,
-  parseFloat64,
   patternToPropertyList,
   propertyListToPattern,
   run,
@@ -22,19 +21,26 @@ import {
   valueForCode,
   Value
 } from "@fraczak/k/backend-api.mjs";
+import { parse as parseIntValue } from "@fraczak/k/codecs/int.mjs";
 import { lowerToWasm, getTagId, getTagFromId } from "../src/kvm2wasm.mjs";
 
-console.log("==> Initializing state and loading @fraczak/k/Examples/ieee.k");
+console.log("==> Initializing state and loading @fraczak/k/Examples/arithmetics.k");
 const state = createState();
-const ieeePath = fileURLToPath(import.meta.resolve("@fraczak/k/Examples/ieee.k"));
-await evaluateInput(`:load ${ieeePath}`, state);
+const arithmeticsPath = fileURLToPath(import.meta.resolve("@fraczak/k/Examples/arithmetics.k"));
+await evaluateInput(`:load ${arithmeticsPath}`, state);
+
+const ops = ["plus", "minus", "times"];
+const benchNames = Object.fromEntries(ops.map(op => [op, `bench_${op}`]));
+for (const op of ops) {
+  await evaluateInput(`${benchNames[op]} = {inc x, () y} ${op};`, state);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const runtimeWat = fs.readFileSync(path.join(__dirname, "../runtime.wat"), "utf8");
 const wabtInstance = await wabtFactory();
 
 function compileWat(watText) {
-  const watModule = wabtInstance.parseWat("ieee_perf.wat", watText, {
+  const watModule = wabtInstance.parseWat("int_perf.wat", watText, {
     mutable_globals: true,
     sat_float_to_int: true,
     sign_extension: true,
@@ -54,6 +60,32 @@ function compileWat(watText) {
 
 const cleanName = (h) => "rel_" + h.replace(/[^a-zA-Z0-9_]/g, "_");
 
+function scanCalls(insts, compiled, queue) {
+  for (const inst of insts) {
+    if (inst.op === "call" && !compiled.has(inst.func) && !queue.includes(inst.func)) {
+      queue.push(inst.func);
+    }
+    if (inst.branches) {
+      for (const branch of inst.branches) {
+        scanCalls(branch.body, compiled, queue);
+      }
+    }
+  }
+}
+
+function cleanInsts(insts) {
+  for (const inst of insts) {
+    if (inst.op === "call") {
+      inst.func = cleanName(inst.func);
+    }
+    if (inst.branches) {
+      for (const branch of inst.branches) {
+        cleanInsts(branch.body);
+      }
+    }
+  }
+}
+
 function compileMultiModule(mainHashes, state) {
   const compiled = new Set();
   const queue = [...mainHashes];
@@ -71,51 +103,11 @@ function compileMultiModule(mainHashes, state) {
 
     const kvmFunc = lowerToKVM(relDef, hash);
     kvmFunc.typePatternGraph = relDef.typePatternGraph;
-
-    for (const inst of kvmFunc.body) {
-      if (inst.op === "call") {
-        if (!compiled.has(inst.func) && !queue.includes(inst.func)) {
-          queue.push(inst.func);
-        }
-      }
-      if (inst.branches) {
-        const scan = (insts) => {
-          for (const sub of insts) {
-            if (sub.op === "call") {
-              if (!compiled.has(sub.func) && !queue.includes(sub.func)) {
-                queue.push(sub.func);
-              }
-            }
-            if (sub.branches) {
-              for (const br of sub.branches) {
-                scan(br.body);
-              }
-            }
-          }
-        };
-        for (const br of inst.branches) {
-          scan(br.body);
-        }
-      }
-    }
+    scanCalls(kvmFunc.body, compiled, queue);
 
     kvmFunc.name = cleanName(hash);
-    const cleanInsts = (insts) => {
-      for (const inst of insts) {
-        if (inst.op === "call") {
-          inst.func = cleanName(inst.func);
-        }
-        if (inst.branches) {
-          for (const br of inst.branches) {
-            cleanInsts(br.body);
-          }
-        }
-      }
-    };
     cleanInsts(kvmFunc.body);
-
-    const wat = lowerToWasm(kvmFunc, kvmFunc.name);
-    wats.push(wat);
+    wats.push(lowerToWasm(kvmFunc, kvmFunc.name));
   }
 
   return wats.join("\n\n");
@@ -126,7 +118,6 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
   const view = new DataView(exports.memory.buffer);
 
   if (patternNode.kind === 1 || patternNode.kind === 3) {
-    const size = view.getUint32(ptr, true);
     const N = view.getUint32(ptr + 4, true);
     const productObj = {};
 
@@ -137,11 +128,11 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
       productObj[edge.label] = readArenaValue(exports, childPtr, pattern, edge.target, patternPropertyList);
     }
     return Value.product(productObj, patternPropertyList);
-  } else if (patternNode.kind === 2 || patternNode.kind === 4) {
-    const size = view.getUint32(ptr, true);
+  }
+
+  if (patternNode.kind === 2 || patternNode.kind === 4) {
     const tagId = view.getUint32(ptr + 4, true);
     const payloadPtr = view.getUint32(ptr + 8, true);
-
     const tag = getTagFromId(tagId);
     const edge = patternNode.edges.find(e => e.label === tag);
     if (!edge) {
@@ -150,6 +141,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
     const payloadVal = readArenaValue(exports, payloadPtr, pattern, edge.target, patternPropertyList);
     return Value.variant(tag, payloadVal, patternPropertyList);
   }
+
   throw new Error(`Unsupported pattern kind: ${patternNode.kind}`);
 }
 
@@ -161,9 +153,8 @@ function writeValueToArena(exports, value, pattern, patternNodeId) {
     const N = keys.length;
     const totalSize = 8 + 8 * N;
     const ptr = exports.alloc(totalSize);
-
-    // Evaluate and allocate all children first
     const childPtrs = [];
+
     for (let i = 0; i < N; i++) {
       const label = keys[i];
       const edge = patternNode.edges.find(e => e.label === label);
@@ -171,7 +162,6 @@ function writeValueToArena(exports, value, pattern, patternNodeId) {
       childPtrs.push(childPtr);
     }
 
-    // All allocations/grows are done; now create the DataView
     const view = new DataView(exports.memory.buffer);
     view.setUint32(ptr, totalSize, true);
     view.setUint32(ptr + 4, N, true);
@@ -182,11 +172,12 @@ function writeValueToArena(exports, value, pattern, patternNodeId) {
       view.setUint32(ptr + offsetVal, childPtrs[i], true);
     }
     return ptr;
-  } else if (isVariant(value)) {
+  }
+
+  if (isVariant(value)) {
     const tagId = getTagId(value.tag);
     const edge = patternNode.edges.find(e => e.label === value.tag);
     const childPtr = writeValueToArena(exports, value.value, pattern, edge.target);
-
     const ptr = exports.alloc(12);
     const view = new DataView(exports.memory.buffer);
 
@@ -195,73 +186,61 @@ function writeValueToArena(exports, value, pattern, patternNodeId) {
     view.setUint32(ptr + 8, childPtr, true);
     return ptr;
   }
+
   throw new Error(`Unsupported value type: ${value}`);
 }
 
-const ops = ["add", "sub", "mul", "div"];
-
 console.log("==> Compiling WebAssembly module...");
-const opHashes = ops.map(op => state.relAliases[op]);
-const wats = compileMultiModule(opHashes, state);
+const benchHashes = ops.map(op => state.relAliases[benchNames[op]]);
+const wats = compileMultiModule(benchHashes, state);
 const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + wats + "\n)";
 const binary = compileWat(fullWat);
 const module = await WebAssembly.compile(binary);
 const instance = await WebAssembly.instantiate(module);
 const exports = instance.exports;
 
-const float64Hash = state.typeAliases.float64;
-const floatPairHash = state.typeAliases.float_pair;
-
-function float64(text) {
-  return valueForCode(parseFloat64(text), float64Hash, codes.find);
+const intHash = state.typeAliases.int;
+function intValue(text) {
+  return valueForCode(parseIntValue(text), intHash, codes.find);
 }
 
-function floatPair(x, y) {
-  return valueForCode(Value.product({
-    x: float64(x),
-    y: float64(y)
-  }), floatPairHash, codes.find);
-}
+const inputTexts = (process.env.INPUTS || process.env.INPUT ||
+  "11111112222223333334444444555555666666777777788888899999900000011111122222233333344444455555")
+  .split(",")
+  .map(text => text.trim())
+  .filter(Boolean);
 
-const values = ["0.5", "-4", "0", "Infinity", "-Infinity", "NaN"];
-
-// Compile all operations
 const relDefs = {};
 const kvmFuncs = {};
 for (const op of ops) {
-  const hash = state.relAliases[op];
+  const name = benchNames[op];
+  const hash = state.relAliases[name];
   const relDef = state.rels[hash];
   relDefs[op] = relDef;
-  kvmFuncs[op] = lowerToKVM(relDef, op);
+  kvmFuncs[op] = lowerToKVM(relDef, name);
 }
 
-// Generate the test matrix (6 * 6 * 4 = 144 cases)
 console.log("==> Generating test cases and caching expected results");
 const testSuite = [];
 for (const op of ops) {
-  for (const x of values) {
-    for (const y of values) {
-      const inputVal = floatPair(x, y);
-      const relDef = relDefs[op];
+  for (const inputText of inputTexts) {
+    const inputVal = intValue(inputText);
+    const relDef = relDefs[op];
 
-      // Compute the native expected result
-      run.defs = state;
-      run_converged.defs = state;
-      const expected = run(codes.find, relDef.def, inputVal, relDef.typePatternGraph);
-      if (expected === undefined) continue;
+    run.defs = state;
+    run_converged.defs = state;
+    const expected = run(codes.find, relDef.def, inputVal, relDef.typePatternGraph);
+    assert.ok(expected !== undefined, `${op}(${inputText}) should produce a value`);
 
-      testSuite.push({
-        op,
-        x,
-        y,
-        inputVal,
-        expected
-      });
-    }
+    testSuite.push({
+      op,
+      inputText,
+      inputVal,
+      expected
+    });
   }
 }
 
-// Cache Wasm pointers and output patterns for benchmark
 for (const tc of testSuite) {
   const relDef = relDefs[tc.op];
   const graph = relDef.typePatternGraph;
@@ -284,16 +263,15 @@ const contextFree = {
   options: { envelopeFree: true }
 };
 
-// Default to 3 iterations for execution
-// Set WASM_ONLY=1 WASM_PROFILE=1 for allocation stats. WASM_RESET=0 and
-// WASM_WARMUP_ITERATIONS=0 reproduce the retained-arena and cold-start costs.
 const ITERATIONS = process.env.ITERATIONS ? parseInt(process.env.ITERATIONS, 10) : 3;
 const WASM_ONLY = process.env.WASM_ONLY === "1";
 const WASM_PROFILE = process.env.WASM_PROFILE === "1";
 const WASM_RESET = process.env.WASM_RESET !== "0";
 const WASM_WARMUP_ITERATIONS = process.env.WASM_WARMUP_ITERATIONS
   ? parseInt(process.env.WASM_WARMUP_ITERATIONS, 10)
-  : 10;
+  : 3;
+
+assert.ok(Number.isInteger(ITERATIONS) && ITERATIONS > 0, "ITERATIONS must be a positive integer");
 
 function printBenchmarkDescription() {
   const lanes = WASM_ONLY
@@ -306,9 +284,10 @@ function printBenchmarkDescription() {
       ];
 
   console.log("==> Benchmark description");
-  console.log("    source: @fraczak/k/Examples/ieee.k");
+  console.log("    source: @fraczak/k/Examples/arithmetics.k");
+  console.log(`    benchmark relations: ${ops.map(op => benchNames[op]).join(", ")}`);
   console.log(`    operations: ${ops.join(", ")}`);
-  console.log(`    values: ${values.join(", ")}`);
+  console.log(`    decimal inputs: ${inputTexts.join(", ")}`);
   console.log(`    cases: ${testSuite.length} operation/input pairs`);
   console.log(`    iterations: ${ITERATIONS}`);
   console.log(`    wasm warmup iterations: ${WASM_WARMUP_ITERATIONS}`);
@@ -319,7 +298,7 @@ function printBenchmarkDescription() {
 }
 
 printBenchmarkDescription();
-console.log(`==> Running Performance Test (${testSuite.length} cases, Iterations: ${ITERATIONS})...`);
+console.log(`==> Running Integer Performance Test (${testSuite.length} cases, Iterations: ${ITERATIONS})...`);
 
 function runWasmIterations(iterations, { profile = false, resetArena = false } = {}) {
   const iterationTimes = [];
@@ -338,7 +317,7 @@ function runWasmIterations(iterations, { profile = false, resetArena = false } =
     for (const tc of testSuite) {
       const mark = resetArena || profile ? exports.arena_mark() : 0;
       const callStartedAt = profile ? performance.now() : 0;
-      const funcName = cleanName(state.relAliases[tc.op]);
+      const funcName = cleanName(state.relAliases[benchNames[tc.op]]);
       const result = exports[funcName](tc.wasmPtrIn);
       assert.ok(result[1] === 1);
 
@@ -433,17 +412,17 @@ const wasmResult = runWasmIterations(ITERATIONS, {
   resetArena: WASM_RESET
 });
 
-console.log("\n=================== BENCHMARK RESULTS ===================");
+console.log("\n=================== INTEGER BENCHMARK RESULTS ===================");
 console.log(`Operation calls per iteration: ${testSuite.length}`);
 console.log(`Total operation calls: ${ITERATIONS * testSuite.length}`);
-console.log("---------------------------------------------------------");
+console.log("-----------------------------------------------------------------");
 if (!WASM_ONLY) {
   console.log(`1. Native JS (Envelope-Aware):   ${formatTiming(nativeAwareResult)}`);
   console.log(`2. Native JS (Envelope-Free):    ${formatTiming(nativeFreeResult)}`);
   console.log(`3. kVM Interpreter (Env-Free):   ${formatTiming(kvmFreeResult)}`);
 }
 console.log(`4. WebAssembly:                  ${formatTiming(wasmResult)}`);
-console.log("=========================================================\n");
+console.log("=================================================================\n");
 
 if (WASM_PROFILE) {
   console.log("================ WEBASSEMBLY ALLOCATION PROFILE ================");
@@ -453,12 +432,11 @@ if (WASM_PROFILE) {
   console.log(`Iteration samples:               ${formatTiming(wasmResult)}`);
   for (const op of ops) {
     const stats = wasmResult.opStats[op];
-    console.log(`${op.padEnd(3)}: calls=${stats.calls}, allocated=${stats.allocatedBytes}, max/call=${stats.maxAllocatedBytes}, total_time=${stats.time.toFixed(2)} ms`);
+    console.log(`${op.padEnd(5)}: calls=${stats.calls}, allocated=${stats.allocatedBytes}, max/call=${stats.maxAllocatedBytes}, total_time=${stats.time.toFixed(2)} ms`);
   }
   console.log("================================================================\n");
 }
 
-// Conformance check
 const toPlainObject = val => JSON.parse(JSON.stringify(val));
 
 for (const tc of testSuite) {
@@ -469,7 +447,7 @@ for (const tc of testSuite) {
   }
 
   const mark = exports.arena_mark();
-  const funcName = cleanName(state.relAliases[tc.op]);
+  const funcName = cleanName(state.relAliases[benchNames[tc.op]]);
   const wasmRes = exports[funcName](tc.wasmPtrIn);
   assert.ok(wasmRes[1] === 1);
   const resWasm = readArenaValue(exports, wasmRes[0], tc.wasmOutputPattern, 0, tc.wasmOutputPatternPropertyList);
