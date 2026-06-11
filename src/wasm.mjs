@@ -570,10 +570,14 @@ function constrainArenaValue(value, patternPropertyList, patternNodeId) {
   return withPattern(value, intersectInputEnvelope(staticPattern, value.pattern));
 }
 
+function wasmPtr(ptr) {
+  return ptr >>> 0;
+}
+
 function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyList, arenaValues, tags) {
   let result;
   const stack = [{
-    ptr,
+    ptr: wasmPtr(ptr),
     patternNodeId,
     assign(value) {
       result = value;
@@ -606,7 +610,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
         const offset = view.getUint32(frame.ptr + 8 + 4 * i, true);
         const childPtr = view.getUint32(frame.ptr + offset, true);
         stack.push({
-          ptr: childPtr,
+          ptr: wasmPtr(childPtr),
           patternNodeId: edge.target,
           assign(value) {
             product[edge.label] = value;
@@ -626,7 +630,7 @@ function readArenaValue(exports, ptr, pattern, patternNodeId, patternPropertyLis
       const variant = Value.variant(tag, undefined, patternForNode(patternPropertyList, frame.patternNodeId));
       frame.assign(variant);
       stack.push({
-        ptr: payloadPtr,
+        ptr: wasmPtr(payloadPtr),
         patternNodeId: edge.target,
         assign(value) {
           variant.value = value;
@@ -670,7 +674,7 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
     }
 
     if (frame.finishVariant) {
-      const ptr = exports.alloc(12);
+      const ptr = wasmPtr(exports.alloc(12));
       const view = new DataView(exports.memory.buffer);
       view.setUint32(ptr, 12, true);
       view.setUint32(ptr + 4, tags.getId(frame.value.tag), true);
@@ -709,7 +713,7 @@ function writeValueToArena(exports, value, pattern, patternNodeId, arenaValues, 
       }
 
       const childPtrs = new Array(fields.length);
-      const ptr = exports.alloc(8 + 8 * fields.length);
+      const ptr = wasmPtr(exports.alloc(8 + 8 * fields.length));
       stack.push({
         finishProduct: true,
         value: frame.value,
@@ -785,7 +789,7 @@ async function runWasmArtifact(wasmBuffer, inputBuffer) {
   if (result[1] !== 1) {
     throw new Error("Wasm relation execution failed (returned false)");
   }
-  const output = readArenaValue(exports, result[0], outputPattern, 0, metadata.outputPattern, arenaValues, tags);
+  const output = readArenaValue(exports, wasmPtr(result[0]), outputPattern, 0, metadata.outputPattern, arenaValues, tags);
   return encodeToWire(output, output.pattern);
 }
 
@@ -800,6 +804,7 @@ export {
   metadataFromModule,
   readArenaValue,
   runWasmArtifact,
+  wasmPtr,
   writeValueToArena
 };
 
@@ -814,5 +819,6 @@ export default {
   metadataFromModule,
   readArenaValue,
   runWasmArtifact,
+  wasmPtr,
   writeValueToArena
 };

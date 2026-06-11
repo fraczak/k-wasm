@@ -1,6 +1,6 @@
 {
   "name": "@fraczak/k-wasm",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Experimental WebAssembly backend for the k language",
   "type": "module",
   "scripts": {
@@ -20,7 +20,7 @@
     "k-wasm-run": "bin/k-wasm-run.mjs"
   },
   "dependencies": {
-    "@fraczak/k": "6.3.2",
+    "@fraczak/k": "6.3.3",
     "wabt": "^1.0.39"
   },
   "main": "index.js",

@@ -34,7 +34,7 @@
     ;; 2. Check if we exceed current memory size
     local.get $new_free
     global.get $arena_max
-    i32.gt_s
+    i32.gt_u
     if
       ;; Calculate how many additional pages we need to grow
       local.get $new_free
@@ -43,7 +43,7 @@
       i32.const 65535
       i32.add
       i32.const 65536
-      i32.div_s
+      i32.div_u
       local.set $pages_needed
 
       ;; Try to grow memory by $pages_needed

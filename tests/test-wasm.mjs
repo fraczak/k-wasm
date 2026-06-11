@@ -328,10 +328,12 @@ import {
   Value
 } from "@fraczak/k/backend-api.mjs";
 import { getTagFromId } from "../src/kvm2wasm.mjs";
-import { readArenaValue, writeValueToArena } from "../src/wasm.mjs";
+import { readArenaValue, wasmPtr, writeValueToArena } from "../src/wasm.mjs";
 
 console.log("==> Running Stack-Safe Arena Serialization Tests");
 {
+  assert.equal(wasmPtr(-2061758672), 2233208624, "Exported Wasm i32 pointers must be treated as unsigned offsets");
+
   const depth = 12000;
   const memory = { buffer: new ArrayBuffer(1024 + 8 + 16 * (depth + 2)) };
   const view = new DataView(memory.buffer);
@@ -432,6 +434,8 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
   const incWat = lowerToWasm(defs.rels.inc, "inc");
   const decWat = lowerToWasm(defs.rels.dec, "dec");
   const addWat = lowerToWasm(defs.rels.add, "add");
+  assert.match(addWat, /\bbr \$tail_loop\b/, "Recursive add should be lowered as a tail jump");
+  assert.doesNotMatch(addWat, /\bcall \$add\b/, "Recursive add should not emit a Wasm self-call");
 
   // Combine and compile
   const fullWat = runtimeWat.trim().slice(0, -1) + "\n" +
@@ -520,6 +524,43 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
     throw new Error(`Unsupported value type: ${value}`);
   }
 
+  function writeUnitProductToArena() {
+    const ptr = exports.alloc(8);
+    const view = new DataView(exports.memory.buffer);
+    view.setUint32(ptr, 8, true);
+    view.setUint32(ptr + 4, 0, true);
+    return ptr;
+  }
+
+  function writeVariantPtrToArena(tag, payloadPtr) {
+    const ptr = exports.alloc(12);
+    const view = new DataView(exports.memory.buffer);
+    view.setUint32(ptr, 12, true);
+    view.setUint32(ptr + 4, getTagId(tag), true);
+    view.setUint32(ptr + 8, payloadPtr, true);
+    return ptr;
+  }
+
+  function writeNatPtrToArena(n) {
+    let ptr = writeVariantPtrToArena("0", writeUnitProductToArena());
+    for (let i = 0; i < n; i++) {
+      ptr = writeVariantPtrToArena("+1", ptr);
+    }
+    return ptr;
+  }
+
+  function writeAddInputPtrToArena(xPtr, yPtr) {
+    const ptr = exports.alloc(24);
+    const view = new DataView(exports.memory.buffer);
+    view.setUint32(ptr, 24, true);
+    view.setUint32(ptr + 4, 2, true);
+    view.setUint32(ptr + 8, 16, true);
+    view.setUint32(ptr + 12, 20, true);
+    view.setUint32(ptr + 16, xPtr, true);
+    view.setUint32(ptr + 20, yPtr, true);
+    return ptr;
+  }
+
   // Helper to extract property list pattern for a pattern ID in graph
   function getPattern(graph, patternId) {
     const nodeId = graph.find(patternId);
@@ -547,6 +588,10 @@ console.log("==> Running End-to-End Peano Addition & Serialization Tests");
 
   // Assert equivalence with reference math
   assert.deepEqual(valOutput.toJSON(), { "+1": { "+1": { "+1": "0" } } }, "Addition of 2 and 1 must equal 3");
+
+  const deepInputPtr = writeAddInputPtrToArena(writeNatPtrToArena(5000), writeNatPtrToArena(0));
+  const deepRes = exports.add(deepInputPtr);
+  assert.equal(deepRes[1], 1, "Tail-recursive Peano addition must handle deep inputs without overflowing the Wasm call stack");
 
   console.log("End-to-End Peano Addition & Serialization tests passed successfully!");
 }
