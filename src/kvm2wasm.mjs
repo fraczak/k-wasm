@@ -617,15 +617,7 @@ export function lowerToWasm(relDef, name, options = {}) {
           break;
         }
         case "call_intrinsic": {
-          const dest = cleanReg(inst.dest);
-          const rawSrc = cleanReg(inst.src);
-          const src = inputMap[rawSrc] || rawSrc;
-
-          lines.push(`    ;; call_intrinsic ${inst.symbol}`);
-          lines.push(`    local.get $${src}`);
-          lines.push(`    local.set $${dest}`);
-          setPattern(dest, inst.pattern || getPattern(inst.src, inputMap));
-          break;
+          throw new Error(`Wasm compiler: unsupported intrinsic '${inst.symbol}'`);
         }
         default:
           throw new Error(`Wasm compiler: unsupported instruction op '${inst.op}'`);
