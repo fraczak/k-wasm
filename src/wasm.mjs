@@ -166,14 +166,30 @@ function annotateObjectWithInputFilter(object, mainRelName, inputPattern, valueP
   return compileObjectDefs(object, mainRelName, mainExp, options);
 }
 
-function cleanCallNames(insts) {
+function cleanFunctionNameMap(names) {
+  const used = new Set();
+  const nameMap = new Map();
+  for (const name of names) {
+    const base = cleanName(name);
+    let candidate = base;
+    let suffix = 1;
+    while (used.has(candidate)) {
+      candidate = `${base}_${suffix++}`;
+    }
+    used.add(candidate);
+    nameMap.set(name, candidate);
+  }
+  return nameMap;
+}
+
+function cleanCallNames(insts, nameMap = null) {
   for (const inst of insts) {
     if (inst.op === "call") {
-      inst.func = cleanName(inst.func);
+      inst.func = nameMap?.get(inst.func) || cleanName(inst.func);
     }
     if (inst.branches) {
       for (const branch of inst.branches) {
-        cleanCallNames(branch.body);
+        cleanCallNames(branch.body, nameMap);
       }
     }
   }
@@ -234,8 +250,9 @@ function compileKVMModule(mainRelName, kvmProgram) {
   const compiled = new Set();
   const queue = [mainRelName];
   const wats = [];
+  const nameMap = cleanFunctionNameMap(Object.keys(kvmProgram));
   const cleanKVMProgram = Object.fromEntries(
-    Object.entries(kvmProgram).map(([name, kvmFunc]) => [cleanName(name), kvmFunc])
+    Object.entries(kvmProgram).map(([name, kvmFunc]) => [nameMap.get(name), kvmFunc])
   );
 
   while (queue.length > 0) {
@@ -251,12 +268,15 @@ function compileKVMModule(mainRelName, kvmProgram) {
     scanCalls(originalFunc.body, compiled, queue);
 
     const kvmFunc = cloneKVMFunction(originalFunc);
-    kvmFunc.name = cleanName(name);
-    cleanCallNames(kvmFunc.body);
+    kvmFunc.name = nameMap.get(name);
+    cleanCallNames(kvmFunc.body, nameMap);
     wats.push(lowerToWasm(kvmFunc, kvmFunc.name, { kvmProgram: cleanKVMProgram }));
   }
 
-  return wats.join("\n\n");
+  return {
+    wat: wats.join("\n\n"),
+    entryName: nameMap.get(mainRelName)
+  };
 }
 
 function getPatternPropertyList(graph, patternId) {
@@ -438,8 +458,38 @@ async function compileWasmArtifactFromDefs(
   return appendCustomSection(await compileWat(fullWat), METADATA_SECTION, JSON.stringify(metadata));
 }
 
-async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__", typingMode = "generic" } = {}) {
+function normalizeKVMInput(kvmInput, { entry = "__main__", typingMode = "generic" } = {}) {
+  if (kvmInput?.format === "k-vm") {
+    const program = kvmInput.functions;
+    if (!program || typeof program !== "object" || Array.isArray(program)) {
+      throw new Error("Expected .kvm artifact to contain a functions object");
+    }
+    if (kvmInput.layer != null && kvmInput.layer !== "KVM") {
+      throw new Error(`Unsupported .kvm artifact layer '${kvmInput.layer}'`);
+    }
+    return {
+      program,
+      entry: kvmInput.entry || entry,
+      typingMode: kvmInput.layer === "KVM" ? "specialized" : typingMode,
+      relation: kvmInput.relation || null
+    };
+  }
+
+  return {
+    program: kvmInput,
+    entry,
+    typingMode,
+    relation: null
+  };
+}
+
+async function compileWasmArtifactFromKVM(kvmInput, options = {}) {
   resetTagIds();
+  const normalized = normalizeKVMInput(kvmInput, options);
+  const { program: kvmProgram, relation } = normalized;
+  const entry = normalized.entry;
+  const typingMode = normalized.typingMode;
+
   if (!kvmProgram || typeof kvmProgram !== "object" || Array.isArray(kvmProgram)) {
     throw new Error("Expected .kvm input to contain a JSON object of kVM functions");
   }
@@ -452,13 +502,15 @@ async function compileWasmArtifactFromKVM(kvmProgram, { entry = "__main__", typi
     throw new Error(`kVM entry function (${entry}) is missing input/output patterns`);
   }
 
-  const moduleWatBody = compileKVMModule(entry, kvmProgram);
+  const moduleWat = compileKVMModule(entry, kvmProgram);
+  const moduleWatBody = moduleWat.wat;
   const fullWat = runtimeWat.trim().slice(0, -1) + "\n" + moduleWatBody + "\n)";
   const metadata = {
     format: ARTIFACT_FORMAT,
     version: ARTIFACT_VERSION,
     abi: "arena-v1",
-    entry: cleanName(entry),
+    entry: moduleWat.entryName,
+    relation,
     inputPattern: mainFunc.inputPattern,
     outputPattern: mainFunc.outputPattern,
     typing: classifyTyping(

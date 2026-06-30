@@ -133,8 +133,26 @@ console.log("==> Running Compiler Scaffolding Tests (id, fail, return)");
   console.log("Compiler Scaffolding tests passed successfully!");
 }
 
-import { annotate } from "@fraczak/k/backend-api.mjs";
+import { annotate, objectToKVMArtifact } from "@fraczak/k/backend-api.mjs";
+import { compileObjectBuffer, decodeObject } from "@fraczak/k/object.mjs";
+import { compileWasmArtifactFromKVM, metadataFromModule } from "../src/wasm.mjs";
 import { getTagId } from "../src/kvm2wasm.mjs";
+
+console.log("==> Running Wrapped kVM Artifact Test");
+{
+  const object = decodeObject(compileObjectBuffer("()", { source: "wasm-kvm-artifact.k" }));
+  const artifact = objectToKVMArtifact(object, "__main__", [["closed-product", []]]);
+  assert.equal(artifact.layer, "KVM");
+  assert.equal(artifact.kir.layer, "KIR-P");
+  assert(!("instanceKey" in artifact));
+  const binary = await compileWasmArtifactFromKVM(artifact);
+  const metadata = metadataFromModule(await WebAssembly.compile(binary));
+  assert.equal(metadata.entry, "rel___main__");
+  assert.equal(metadata.relation, "__main__");
+  assert(!("instanceKey" in metadata));
+  assert.deepEqual(metadata.inputPattern, artifact.inputPattern);
+  assert.deepEqual(metadata.outputPattern, artifact.outputPattern);
+}
 
 console.log("==> Running Product Operations Integration Tests");
 {
